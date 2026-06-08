@@ -407,6 +407,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateAddSeverityColumn(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateWorkflowStatusColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.migrateLegacyIssues(ctx); err != nil {
 		return err
 	}
@@ -478,6 +481,19 @@ func (s *Store) migrateAddSeverityColumn(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `ALTER TABLE issue ADD COLUMN SEVERITY_ TEXT NOT NULL DEFAULT 'medium'`)
 	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		return err
+	}
+	return nil
+}
+
+func (s *Store) migrateWorkflowStatusColumns(ctx context.Context) error {
+	for _, stmt := range []string{
+		`ALTER TABLE workflow_status ADD COLUMN STAGE_ID_ TEXT`,
+		`ALTER TABLE workflow_status ADD COLUMN IS_ACTIVE_ INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE workflow_transition ADD COLUMN IS_ACTIVE_ INTEGER NOT NULL DEFAULT 1`,
+	} {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
 	}
 	return nil
 }
@@ -598,11 +614,12 @@ func (s *Store) SeedWorkflowCatalog(ctx context.Context) error {
 		for i, status := range statuses {
 			if _, err := s.db.ExecContext(ctx, `
 				INSERT INTO workflow_status (
-					ID_, WORKFLOW_ID_, STATUS_DEF_ID_, KEY_, NAME_, COLUMN_KEY_, POSITION_,
-					IS_START_, IS_TERMINAL_, REVIEW_REQUIRED_
+					ID_, WORKFLOW_ID_, STAGE_ID_, STATUS_DEF_ID_, KEY_, NAME_, COLUMN_KEY_, POSITION_,
+					IS_START_, IS_TERMINAL_, IS_ACTIVE_, REVIEW_REQUIRED_
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 1, ?)
 				ON CONFLICT(ID_) DO UPDATE SET
+					STAGE_ID_ = NULL,
 					STATUS_DEF_ID_ = excluded.STATUS_DEF_ID_,
 					KEY_ = excluded.KEY_,
 					NAME_ = excluded.NAME_,
@@ -610,6 +627,7 @@ func (s *Store) SeedWorkflowCatalog(ctx context.Context) error {
 					POSITION_ = excluded.POSITION_,
 					IS_START_ = excluded.IS_START_,
 					IS_TERMINAL_ = excluded.IS_TERMINAL_,
+					IS_ACTIVE_ = 1,
 					REVIEW_REQUIRED_ = excluded.REVIEW_REQUIRED_
 			`, workflowStatusID(workflow.ID, status.Key), workflow.ID, statusDefID(status.Key), status.Key, status.Name, status.Column, i+1, boolInt(status.Key == string(kanban.StatusBacklog)), boolInt(status.Key == string(kanban.StatusCompleted)), boolInt(status.Key == string(kanban.StatusInReview))); err != nil {
 				return err

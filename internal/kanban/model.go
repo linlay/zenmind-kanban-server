@@ -357,6 +357,7 @@ type WorkflowStage struct {
 type WorkflowStatus struct {
 	ID             string `json:"id"`
 	WorkflowID     string `json:"workflowId"`
+	StageID        string `json:"stageId,omitempty"`
 	StatusDefID    string `json:"statusDefId"`
 	Key            string `json:"key"`
 	Name           string `json:"name"`
@@ -364,6 +365,7 @@ type WorkflowStatus struct {
 	Position       int    `json:"position"`
 	IsStart        bool   `json:"isStart"`
 	IsTerminal     bool   `json:"isTerminal"`
+	IsActive       bool   `json:"isActive"`
 	ReviewRequired bool   `json:"reviewRequired"`
 }
 
@@ -378,6 +380,7 @@ type WorkflowTransition struct {
 	Name           string    `json:"name"`
 	ActorType      string    `json:"actorType"`
 	RequiresReview bool      `json:"requiresReview"`
+	IsActive       bool      `json:"isActive"`
 	Position       int       `json:"position"`
 	CreatedAt      time.Time `json:"createdAt"`
 }
