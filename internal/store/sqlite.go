@@ -407,6 +407,12 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateAddSeverityColumn(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateAddWorkflowTransitionModeColumn(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateDropLegacyIssueTypeColumn(ctx); err != nil {
+		return err
+	}
 	if err := s.migrateLegacyIssues(ctx); err != nil {
 		return err
 	}
@@ -480,6 +486,26 @@ func (s *Store) migrateAddSeverityColumn(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Store) migrateAddWorkflowTransitionModeColumn(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `ALTER TABLE workflow ADD COLUMN TRANSITION_MODE_ TEXT NOT NULL DEFAULT 'strict' CHECK (TRANSITION_MODE_ IN ('strict', 'free'))`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) migrateDropLegacyIssueTypeColumn(ctx context.Context) error {
+	columns, err := s.tableColumns(ctx, "issue")
+	if err != nil {
+		return err
+	}
+	if !columns["TYPE_ID_"] {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE issue DROP COLUMN TYPE_ID_`)
+	return err
 }
 
 func (s *Store) EnsureDefaultProject(ctx context.Context) error {
@@ -1008,7 +1034,7 @@ func (s *Store) ListWorkflowCatalog(ctx context.Context) (kanban.WorkflowCatalog
 	if err != nil {
 		return catalog, err
 	}
-catalog.Teams, err = s.listTeams(ctx)
+	catalog.Teams, err = s.listTeams(ctx)
 	if err != nil {
 		return catalog, err
 	}
@@ -2393,10 +2419,10 @@ func (t transitionSeed) ID(workflowID string, position int) string {
 func workflowSeeds() []workflowSeed {
 	return []workflowSeed{
 		{
-			ID:          kanban.DefaultWorkflowID,
-			Key:         kanban.DefaultWorkflowKey,
-			Name:        "标准需求",
-			Description: "标准需求从澄清、设计、开发、测试到发布的完整交付流程。",
+			ID:             kanban.DefaultWorkflowID,
+			Key:            kanban.DefaultWorkflowKey,
+			Name:           "标准需求",
+			Description:    "标准需求从澄清、设计、开发、测试到发布的完整交付流程。",
 			TransitionMode: "strict",
 			Stages: []stageSeed{
 				{"requirement_clarification", "需求澄清"},
@@ -2408,10 +2434,10 @@ func workflowSeeds() []workflowSeed {
 			ReviewStages: map[int]bool{0: true, 1: true, 2: true, 3: true},
 		},
 		{
-			ID:          "workflow-bug-fix",
-			Key:         "bug_fix",
-			Name:        "BUG 修复",
-			Description: "缺陷分诊、复现定位、修复、回归与发布流程。",
+			ID:             "workflow-bug-fix",
+			Key:            "bug_fix",
+			Name:           "BUG 修复",
+			Description:    "缺陷分诊、复现定位、修复、回归与发布流程。",
 			TransitionMode: "strict",
 			Stages: []stageSeed{
 				{"issue_triage", "问题分诊"},
@@ -2423,10 +2449,10 @@ func workflowSeeds() []workflowSeed {
 			ReviewStages: map[int]bool{2: true, 3: true},
 		},
 		{
-			ID:          "workflow-optimization-iteration",
-			Key:         "optimization_iteration",
-			Name:        "优化迭代",
-			Description: "围绕现状、方案、实现、验证和灰度发布的优化流程。",
+			ID:             "workflow-optimization-iteration",
+			Key:            "optimization_iteration",
+			Name:           "优化迭代",
+			Description:    "围绕现状、方案、实现、验证和灰度发布的优化流程。",
 			TransitionMode: "strict",
 			Stages: []stageSeed{
 				{"current_assessment", "现状评估"},
@@ -2452,10 +2478,10 @@ func workflowSeeds() []workflowSeed {
 			ReviewStages: map[int]bool{1: true},
 		},
 		{
-			ID:          "workflow-graphic-publish",
-			Key:         "graphic_publish",
-			Name:        "图文制作发布",
-			Description: "图文选题、文案、视觉、审校和发布投放流程。",
+			ID:             "workflow-graphic-publish",
+			Key:            "graphic_publish",
+			Name:           "图文制作发布",
+			Description:    "图文选题、文案、视觉、审校和发布投放流程。",
 			TransitionMode: "strict",
 			Stages: []stageSeed{
 				{"topic_planning", "选题策划"},

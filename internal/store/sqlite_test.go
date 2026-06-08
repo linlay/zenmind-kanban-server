@@ -192,3 +192,113 @@ func TestMigrationRepairsLegacyProjectClosureColumns(t *testing.T) {
 		t.Fatalf("expected project_closure to be rebuilt from valid projects")
 	}
 }
+
+func TestMigrationAddsWorkflowTransitionModeColumn(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "kanban.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `
+		CREATE TABLE workflow (
+			ID_ TEXT PRIMARY KEY,
+			KEY_ TEXT NOT NULL UNIQUE,
+			NAME_ TEXT NOT NULL,
+			DESCRIPTION_ TEXT NOT NULL DEFAULT '',
+			IS_DEFAULT_ INTEGER NOT NULL DEFAULT 0 CHECK (IS_DEFAULT_ IN (0, 1)),
+			CREATED_BY_ TEXT,
+			UPDATED_BY_ TEXT,
+			CREATED_AT_ TEXT NOT NULL,
+			UPDATED_AT_ TEXT NOT NULL,
+			DELETED_AT_ TEXT
+		)
+	`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	sqliteStore, err := Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteStore.Close()
+
+	var transitionMode string
+	if err := sqliteStore.db.QueryRowContext(context.Background(), `
+		SELECT dflt_value FROM pragma_table_info('workflow') WHERE name = 'TRANSITION_MODE_'
+	`).Scan(&transitionMode); err != nil {
+		t.Fatal(err)
+	}
+	if transitionMode != "'strict'" {
+		t.Fatalf("expected TRANSITION_MODE_ default 'strict', got %q", transitionMode)
+	}
+}
+
+func TestMigrationDropsLegacyIssueTypeColumn(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "kanban.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `
+		CREATE TABLE issue (
+			ID_ TEXT PRIMARY KEY,
+			PROJECT_ID_ TEXT NOT NULL,
+			WORKFLOW_ID_ TEXT NOT NULL,
+			TYPE_ID_ TEXT NOT NULL,
+			STAGE_ID_ TEXT NOT NULL,
+			STATUS_ID_ TEXT NOT NULL,
+			TITLE_ TEXT NOT NULL CHECK (length(trim(TITLE_)) > 0),
+			DESCRIPTION_ TEXT NOT NULL DEFAULT '',
+			PRIORITY_ TEXT NOT NULL CHECK (PRIORITY_ IN ('high','medium','low')),
+			SEVERITY_ TEXT NOT NULL DEFAULT 'medium' CHECK (SEVERITY_ IN ('critical','high','medium','low')),
+			POSITION_ REAL NOT NULL,
+			ASSIGNEE_ID_ TEXT,
+			WORKER_TYPE_ TEXT CHECK (WORKER_TYPE_ IN ('human','agent')),
+			WORKER_ID_ TEXT,
+			WORKER_AGENT_ TEXT,
+			REVIEWER_ID_ TEXT,
+			REVIEW_REQUIRED_ INTEGER NOT NULL DEFAULT 0 CHECK (REVIEW_REQUIRED_ IN (0, 1)),
+			ACTIVE_REVIEW_ID_ TEXT,
+			ACTIVE_RUN_ID_ TEXT,
+			REVISION_ INTEGER NOT NULL DEFAULT 0,
+			CREATED_BY_ TEXT,
+			UPDATED_BY_ TEXT,
+			CREATED_BY_AGENT_ TEXT,
+			UPDATED_BY_AGENT_ TEXT,
+			CREATED_AT_ TEXT NOT NULL,
+			UPDATED_AT_ TEXT NOT NULL,
+			DELETED_AT_ TEXT,
+			CHECK (
+				WORKER_TYPE_ IS NULL OR
+				(WORKER_TYPE_ = 'human' AND WORKER_ID_ IS NOT NULL AND WORKER_AGENT_ IS NULL) OR
+				(WORKER_TYPE_ = 'agent' AND WORKER_AGENT_ IS NOT NULL AND WORKER_ID_ IS NULL)
+			)
+		)
+	`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	sqliteStore, err := Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteStore.Close()
+
+	var typeColumnCount int
+	if err := sqliteStore.db.QueryRowContext(context.Background(), `
+		SELECT COUNT(*) FROM pragma_table_info('issue') WHERE name = 'TYPE_ID_'
+	`).Scan(&typeColumnCount); err != nil {
+		t.Fatal(err)
+	}
+	if typeColumnCount != 0 {
+		t.Fatalf("expected legacy TYPE_ID_ column to be removed, got %d", typeColumnCount)
+	}
+}

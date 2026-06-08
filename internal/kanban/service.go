@@ -542,14 +542,17 @@ func (s *Service) SyncAssistantEvent(ctx context.Context, boardID string, projec
 		next.ChatID = event.ChatID
 	}
 	if *runState == RunStateCompleted {
-		reviewStatus := StatusInReview
-		statusRef := resolveStatus(catalog, next.WorkflowID, nil, &reviewStatus)
-		next.Status = reviewStatus
+		nextStatus := StatusCompleted
+		if next.ReviewRequired || next.ReviewerID != nil {
+			nextStatus = StatusInReview
+		}
+		statusRef := resolveStatus(catalog, next.WorkflowID, nil, &nextStatus)
+		next.Status = nextStatus
 		next.StatusID = statusRef.ID
 		next.StatusKey = statusRef.Key
 		next.StatusName = statusRef.Name
 		next.ColumnKey = statusRef.ColumnKey
-		next.ReviewRequired = true
+		next.ReviewRequired = next.ReviewRequired || next.Status == StatusInReview
 	}
 	next.UpdatedAt = time.Now().UTC()
 	next.UpdatedBy = actorPtr(actor)
