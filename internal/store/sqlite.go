@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,9 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+//go:embed workflow_seed.sql
+var workflowSeedSQL string
 
 type Store struct {
 	db   *sql.DB
@@ -577,140 +581,38 @@ func (s *Store) EnsureDefaultBoard(ctx context.Context) error {
 
 func (s *Store) SeedWorkflowCatalog(ctx context.Context) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	statuses := []struct {
-		Key    string
-		Name   string
-		Column string
-	}{
-		{"backlog", "新建", "backlog"},
-		{"todo", "待办", "todo"},
-		{"in_progress", "处理中", "in_progress"},
-		{"in_review", "待审查", "in_review"},
-		{"completed", "已完成", "completed"},
-	}
-	for _, status := range statuses {
-		if _, err := s.db.ExecContext(ctx, `
-			INSERT INTO workflow_status_def (
-				ID_, KEY_, NAME_, COLUMN_KEY_, DESCRIPTION_, IS_SYSTEM_, CREATED_AT_, UPDATED_AT_
-			)
-			VALUES (?, ?, ?, ?, '', 1, ?, ?)
-			ON CONFLICT(ID_) DO UPDATE SET
-				KEY_ = excluded.KEY_,
-				NAME_ = excluded.NAME_,
-				COLUMN_KEY_ = excluded.COLUMN_KEY_,
-				UPDATED_AT_ = excluded.UPDATED_AT_
-		`, statusDefID(status.Key), status.Key, status.Name, status.Column, now, now); err != nil {
-			return err
+	sql := strings.ReplaceAll(workflowSeedSQL, "__NOW__", now)
+	for _, statement := range splitSQL(sql) {
+		statement = strings.TrimSpace(statement)
+		if statement == "" || strings.HasPrefix(statement, "--") {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("seed workflow: %w\nSQL: %s", err, statement)
 		}
 	}
-	stageDefs := map[string]string{}
-	for _, workflow := range workflowSeeds() {
-		for _, stage := range workflow.Stages {
-			stageDefs[stage.Key] = stage.Name
-		}
-	}
-	for key, name := range stageDefs {
-		if _, err := s.db.ExecContext(ctx, `
-			INSERT INTO workflow_stage_def (
-				ID_, KEY_, NAME_, DESCRIPTION_, IS_SYSTEM_, CREATED_AT_, UPDATED_AT_
-			)
-			VALUES (?, ?, ?, '', 1, ?, ?)
-			ON CONFLICT(ID_) DO UPDATE SET
-				KEY_ = excluded.KEY_,
-				NAME_ = excluded.NAME_,
-				UPDATED_AT_ = excluded.UPDATED_AT_
-		`, stageDefID(key), key, name, now, now); err != nil {
-			return err
-		}
-	}
-	for _, workflow := range workflowSeeds() {
-		isDefault := workflow.ID == kanban.DefaultWorkflowID
-		if _, err := s.db.ExecContext(ctx, `
-			INSERT INTO workflow (
-				ID_, KEY_, NAME_, DESCRIPTION_, IS_DEFAULT_, TRANSITION_MODE_, CREATED_AT_, UPDATED_AT_
-			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(ID_) DO UPDATE SET
-				KEY_ = excluded.KEY_,
-				NAME_ = excluded.NAME_,
-				DESCRIPTION_ = excluded.DESCRIPTION_,
-				IS_DEFAULT_ = excluded.IS_DEFAULT_,
-				TRANSITION_MODE_ = excluded.TRANSITION_MODE_,
-				UPDATED_AT_ = excluded.UPDATED_AT_
-		`, workflow.ID, workflow.Key, workflow.Name, workflow.Description, boolInt(isDefault), workflow.TransitionMode, now, now); err != nil {
-			return err
-		}
-		for i, stage := range workflow.Stages {
-			if _, err := s.db.ExecContext(ctx, `
-				INSERT INTO workflow_stage (
-					ID_, WORKFLOW_ID_, STAGE_DEF_ID_, KEY_, NAME_, POSITION_, IS_START_, IS_END_
-				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-				ON CONFLICT(ID_) DO UPDATE SET
-					STAGE_DEF_ID_ = excluded.STAGE_DEF_ID_,
-					KEY_ = excluded.KEY_,
-					NAME_ = excluded.NAME_,
-					POSITION_ = excluded.POSITION_,
-					IS_START_ = excluded.IS_START_,
-					IS_END_ = excluded.IS_END_
-			`, workflowStageID(workflow.ID, stage.Key), workflow.ID, stageDefID(stage.Key), stage.Key, stage.Name, i+1, boolInt(i == 0), boolInt(i == len(workflow.Stages)-1)); err != nil {
-				return err
-			}
-		}
-		for i, status := range statuses {
-			if _, err := s.db.ExecContext(ctx, `
-				INSERT INTO workflow_status (
-					ID_, WORKFLOW_ID_, STAGE_ID_, STATUS_DEF_ID_, KEY_, NAME_, COLUMN_KEY_, POSITION_,
-					IS_START_, IS_TERMINAL_, IS_ACTIVE_, REVIEW_REQUIRED_
-				)
-				VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-				ON CONFLICT(ID_) DO UPDATE SET
-					STAGE_ID_ = NULL,
-					STATUS_DEF_ID_ = excluded.STATUS_DEF_ID_,
-					KEY_ = excluded.KEY_,
-					NAME_ = excluded.NAME_,
-					COLUMN_KEY_ = excluded.COLUMN_KEY_,
-					POSITION_ = excluded.POSITION_,
-					IS_START_ = excluded.IS_START_,
-					IS_TERMINAL_ = excluded.IS_TERMINAL_,
-					IS_ACTIVE_ = 1,
-					REVIEW_REQUIRED_ = excluded.REVIEW_REQUIRED_
-			`, workflowStatusID(workflow.ID, status.Key), workflow.ID, statusDefID(status.Key), status.Key, status.Name, status.Column, i+1, boolInt(status.Key == string(kanban.StatusBacklog)), boolInt(status.Key == string(kanban.StatusCompleted)), boolInt(status.Key == string(kanban.StatusInReview))); err != nil {
-				return err
-			}
-		}
-		for i, transition := range buildTransitions(workflow) {
-			if _, err := s.db.ExecContext(ctx, `
-				INSERT INTO workflow_transition (
-					ID_, WORKFLOW_ID_, FROM_STAGE_ID_, FROM_STATUS_ID_, TO_STAGE_ID_, TO_STATUS_ID_,
-					ACTION_KEY_, NAME_, ACTOR_TYPE_, REQUIRES_REVIEW_, POSITION_, CREATED_AT_
-				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-				ON CONFLICT(ID_) DO UPDATE SET
-					FROM_STAGE_ID_ = excluded.FROM_STAGE_ID_,
-					FROM_STATUS_ID_ = excluded.FROM_STATUS_ID_,
-					TO_STAGE_ID_ = excluded.TO_STAGE_ID_,
-					TO_STATUS_ID_ = excluded.TO_STATUS_ID_,
-					ACTION_KEY_ = excluded.ACTION_KEY_,
-					NAME_ = excluded.NAME_,
-					ACTOR_TYPE_ = excluded.ACTOR_TYPE_,
-					REQUIRES_REVIEW_ = excluded.REQUIRES_REVIEW_,
-					POSITION_ = excluded.POSITION_
-			`, transition.ID(workflow.ID, i+1), workflow.ID,
-				workflowStageID(workflow.ID, transition.FromStageKey),
-				workflowStatusID(workflow.ID, transition.FromStatusKey),
-				workflowStageID(workflow.ID, transition.ToStageKey),
-				workflowStatusID(workflow.ID, transition.ToStatusKey),
-				transition.ActionKey, transition.Name, transition.ActorType,
-				boolInt(transition.RequiresReview), i+1, now); err != nil {
-				return err
-			}
-		}
-	}
-
 	return nil
 }
 
+func splitSQL(s string) []string {
+	var parts []string
+	current := ""
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+		current += line + "\n"
+		if strings.HasSuffix(trimmed, ";") {
+			parts = append(parts, current)
+			current = ""
+		}
+	}
+	if strings.TrimSpace(current) != "" {
+		parts = append(parts, current)
+	}
+	return parts
+}
 func (s *Store) migrateLegacyProjects(ctx context.Context) error {
 	exists, err := s.tableExists(ctx, "projects")
 	if err != nil || !exists {
@@ -2402,11 +2304,17 @@ func replaceAttachmentsTx(ctx context.Context, tx *sql.Tx, issueID string, attac
 	return nil
 }
 
+var workflowStartStageKeys = map[string]string{
+	"workflow-standard-requirement":   "requirement_clarification",
+	"workflow-bug-fix":               "issue_triage",
+	"workflow-optimization-iteration": "current_assessment",
+	"workflow-free-task":             "todo",
+	"workflow-graphic-publish":       "topic_planning",
+}
+
 func workflowStartStageID(workflowID string) string {
-	for _, seed := range workflowSeeds() {
-		if seed.ID == workflowID && len(seed.Stages) > 0 {
-			return workflowStageID(workflowID, seed.Stages[0].Key)
-		}
+	if key, ok := workflowStartStageKeys[workflowID]; ok {
+		return workflowStageID(workflowID, key)
 	}
 	return workflowStageID(kanban.DefaultWorkflowID, "requirement_clarification")
 }
@@ -2425,180 +2333,6 @@ func workflowStageID(workflowID string, stageKey string) string {
 
 func workflowStatusID(workflowID string, statusKey string) string {
 	return workflowID + "-status-" + statusKey
-}
-
-type stageSeed struct {
-	Key  string
-	Name string
-}
-
-type workflowSeed struct {
-	ID             string
-	Key            string
-	Name           string
-	Description    string
-	TransitionMode string
-	Stages         []stageSeed
-	ReviewStages   map[int]bool
-}
-
-type transitionSeed struct {
-	FromStageKey   string
-	FromStatusKey  string
-	ToStageKey     string
-	ToStatusKey    string
-	ActionKey      string
-	Name           string
-	ActorType      string
-	RequiresReview bool
-}
-
-func (t transitionSeed) ID(workflowID string, position int) string {
-	return workflowID + "-transition-" + fmt.Sprintf("%03d", position) + "-" + t.ActionKey + "-" + t.FromStageKey + "-" + t.FromStatusKey
-}
-
-func workflowSeeds() []workflowSeed {
-	return []workflowSeed{
-		{
-			ID:             kanban.DefaultWorkflowID,
-			Key:            kanban.DefaultWorkflowKey,
-			Name:           "标准需求",
-			Description:    "标准需求从澄清、设计、开发、测试到发布的完整交付流程。",
-			TransitionMode: "strict",
-			Stages: []stageSeed{
-				{"requirement_clarification", "需求澄清"},
-				{"solution_design", "方案设计"},
-				{"development", "开发实现"},
-				{"testing_acceptance", "测试验收"},
-				{"release", "发布上线"},
-			},
-			ReviewStages: map[int]bool{0: true, 1: true, 2: true, 3: true},
-		},
-		{
-			ID:             "workflow-bug-fix",
-			Key:            "bug_fix",
-			Name:           "BUG 修复",
-			Description:    "缺陷分诊、复现定位、修复、回归与发布流程。",
-			TransitionMode: "strict",
-			Stages: []stageSeed{
-				{"issue_triage", "问题分诊"},
-				{"reproduce_diagnose", "复现定位"},
-				{"fix_implementation", "修复实现"},
-				{"regression_verification", "回归验证"},
-				{"fix_release", "发布修复"},
-			},
-			ReviewStages: map[int]bool{2: true, 3: true},
-		},
-		{
-			ID:             "workflow-optimization-iteration",
-			Key:            "optimization_iteration",
-			Name:           "优化迭代",
-			Description:    "围绕现状、方案、实现、验证和灰度发布的优化流程。",
-			TransitionMode: "strict",
-			Stages: []stageSeed{
-				{"current_assessment", "现状评估"},
-				{"optimization_plan", "优化方案"},
-				{"iteration_implementation", "迭代实现"},
-				{"effect_verification", "效果验证"},
-				{"canary_release", "灰度发布"},
-			},
-			ReviewStages: map[int]bool{1: true, 2: true, 3: true},
-		},
-
-		{
-			ID:             "workflow-free-task",
-			Key:            "free_task",
-			Name:           "自由任务",
-			Description:    "轻量级自由流转任务，可任意切换阶段和状态。",
-			TransitionMode: "free",
-			Stages: []stageSeed{
-				{"todo", "待办"},
-				{"in_progress", "处理中"},
-				{"done", "已完成"},
-			},
-			ReviewStages: map[int]bool{1: true},
-		},
-		{
-			ID:             "workflow-graphic-publish",
-			Key:            "graphic_publish",
-			Name:           "图文制作发布",
-			Description:    "图文选题、文案、视觉、审校和发布投放流程。",
-			TransitionMode: "strict",
-			Stages: []stageSeed{
-				{"topic_planning", "选题策划"},
-				{"copywriting", "文案撰写"},
-				{"visual_production", "视觉制作"},
-				{"editing_proofreading", "编辑审校"},
-				{"publish_delivery", "发布投放"},
-			},
-			ReviewStages: map[int]bool{1: true, 2: true, 3: true},
-		},
-	}
-}
-
-func buildTransitions(workflow workflowSeed) []transitionSeed {
-	var transitions []transitionSeed
-	for i, stage := range workflow.Stages {
-		if i == 0 {
-			transitions = append(transitions, transitionSeed{
-				FromStageKey: stage.Key, FromStatusKey: "backlog",
-				ToStageKey: stage.Key, ToStatusKey: "todo",
-				ActionKey: "plan", Name: "进入待办", ActorType: "human",
-			})
-		}
-		transitions = append(transitions, transitionSeed{
-			FromStageKey: stage.Key, FromStatusKey: "todo",
-			ToStageKey: stage.Key, ToStatusKey: "in_progress",
-			ActionKey: "start", Name: "开始处理", ActorType: "human",
-		})
-		if i == len(workflow.Stages)-1 {
-			transitions = append(transitions, transitionSeed{
-				FromStageKey: stage.Key, FromStatusKey: "in_progress",
-				ToStageKey: stage.Key, ToStatusKey: "completed",
-				ActionKey: "complete", Name: "完成", ActorType: "human",
-			})
-		} else if workflow.ReviewStages[i] {
-			transitions = append(transitions, transitionSeed{
-				FromStageKey: stage.Key, FromStatusKey: "in_progress",
-				ToStageKey: stage.Key, ToStatusKey: "in_review",
-				ActionKey: "submit_review", Name: "提交审查", ActorType: "human", RequiresReview: true,
-			})
-		} else {
-			nextStage := workflow.Stages[i+1]
-			transitions = append(transitions, transitionSeed{
-				FromStageKey: stage.Key, FromStatusKey: "in_progress",
-				ToStageKey: nextStage.Key, ToStatusKey: "todo",
-				ActionKey: "complete_stage", Name: "阶段完成", ActorType: "human",
-			})
-		}
-		transitions = append(transitions, transitionSeed{
-			FromStageKey: stage.Key, FromStatusKey: "in_review",
-			ToStageKey: stage.Key, ToStatusKey: "in_progress",
-			ActionKey: "changes_requested", Name: "打回修改", ActorType: "human", RequiresReview: true,
-		})
-		transitions = append(transitions, transitionSeed{
-			FromStageKey: stage.Key, FromStatusKey: "in_progress",
-			ToStageKey: stage.Key, ToStatusKey: "in_review",
-			ActionKey: "agent_done", Name: "智能体交付", ActorType: "agent", RequiresReview: true,
-		})
-		toStage := stage.Key
-		toStatus := "completed"
-		if i < len(workflow.Stages)-1 {
-			toStage = workflow.Stages[i+1].Key
-			toStatus = "todo"
-		}
-		transitions = append(transitions, transitionSeed{
-			FromStageKey: stage.Key, FromStatusKey: "in_review",
-			ToStageKey: toStage, ToStatusKey: toStatus,
-			ActionKey: "approve", Name: "审查通过", ActorType: "human", RequiresReview: true,
-		})
-		transitions = append(transitions, transitionSeed{
-			FromStageKey: stage.Key, FromStatusKey: "completed",
-			ToStageKey: stage.Key, ToStatusKey: "todo",
-			ActionKey: "reopen", Name: "重新打开", ActorType: "human",
-		})
-	}
-	return transitions
 }
 
 func normalizeAgentRunStatus(value string) string {
