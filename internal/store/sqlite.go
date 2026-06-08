@@ -954,6 +954,32 @@ func (s *Store) tableColumns(ctx context.Context, table string) (map[string]bool
 	}
 	return columns, rows.Err()
 }
+func (s *Store) UpsertWorkflow(ctx context.Context, wf kanban.Workflow) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	isDefault := wf.ID == kanban.DefaultWorkflowID
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO workflow (
+			ID_, KEY_, NAME_, DESCRIPTION_, IS_DEFAULT_, TRANSITION_MODE_, CREATED_AT_, UPDATED_AT_
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(ID_) DO UPDATE SET
+			KEY_ = excluded.KEY_,
+			NAME_ = excluded.NAME_,
+			DESCRIPTION_ = excluded.DESCRIPTION_,
+			IS_DEFAULT_ = excluded.IS_DEFAULT_,
+			TRANSITION_MODE_ = excluded.TRANSITION_MODE_,
+			UPDATED_AT_ = excluded.UPDATED_AT_
+	`, wf.ID, wf.Key, wf.Name, wf.Description, boolInt(isDefault), wf.TransitionMode, now, now)
+	return err
+}
+
+func (s *Store) SoftDeleteWorkflow(ctx context.Context, id string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow SET DELETED_AT_ = ? WHERE ID_ = ?
+	`, now, id)
+	return err
+}
 
 func (s *Store) ListWorkflowCatalog(ctx context.Context) (kanban.WorkflowCatalog, error) {
 	var catalog kanban.WorkflowCatalog

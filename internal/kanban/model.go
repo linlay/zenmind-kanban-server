@@ -307,6 +307,19 @@ type Workflow struct {
 	DeletedAt      *time.Time `json:"deletedAt,omitempty"`
 }
 
+type WorkflowInput struct {
+	Key            string `json:"key"`
+	Name           string `json:"name"`
+	Description    string `json:"description,omitempty"`
+	TransitionMode string `json:"transitionMode"`
+}
+
+type WorkflowUpdateInput struct {
+	Name           *string `json:"name,omitempty"`
+	Description    *string `json:"description,omitempty"`
+	TransitionMode *string `json:"transitionMode,omitempty"`
+}
+
 type WorkflowStageDef struct {
 	ID          string     `json:"id"`
 	Key         string     `json:"key"`

@@ -481,6 +481,32 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		session.respond(env, map[string]any{"ok": true, "items": items})
 	case "desktop.assistant.listAgents":
 		h.forwardDesktop(session, env, "desktop.assistant.listAgents")
+	case "kanban.workflow.create":
+		var input kanban.WorkflowInput
+		if !decodeOrRespond(session, env, &input) {
+			return
+		}
+		result, err := h.service.CreateWorkflow(context.Background(), input, session.actorID())
+		h.respondMutation(session, env, result, err)
+	case "kanban.workflow.update":
+		var payload struct {
+			ID    string                      `json:"id"`
+			Input kanban.WorkflowUpdateInput `json:"input"`
+		}
+		if !decodeOrRespond(session, env, &payload) {
+			return
+		}
+		result, err := h.service.UpdateWorkflow(context.Background(), payload.ID, payload.Input, session.actorID())
+		h.respondMutation(session, env, result, err)
+	case "kanban.workflow.delete":
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if !decodeOrRespond(session, env, &payload) {
+			return
+		}
+		result, err := h.service.DeleteWorkflow(context.Background(), payload.ID, session.actorID())
+		h.respondMutation(session, env, result, err)
 	case "kanban.automation.sync":
 		h.forwardDesktop(session, env, "desktop.automation.sync")
 	case "desktop.hello":

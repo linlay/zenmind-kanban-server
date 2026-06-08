@@ -2,6 +2,7 @@ package kanban
 
 import (
 	"context"
+	"encoding/hex"
 	"strings"
 	"time"
 )
@@ -435,6 +436,82 @@ func mutationResult(revision int64, message string) MutationResult {
 func mutationError(message string) MutationResult {
 	return MutationResult{OK: false, Message: message, BoardID: DefaultBoardID, ProjectID: DefaultProjectID}
 }
+func (s *Service) CreateWorkflow(ctx context.Context, input WorkflowInput, actor string) (MutationResult, error) {
+	if strings.TrimSpace(input.Key) == "" || strings.TrimSpace(input.Name) == "" {
+		return mutationError("workflow key 和名称不能为空。"), nil
+	}
+	if input.TransitionMode == "" {
+		input.TransitionMode = "strict"
+	}
+	if input.TransitionMode != "strict" && input.TransitionMode != "free" {
+		return mutationError("transitionMode 必须是 strict 或 free。"), nil
+	}
+	now := time.Now().UTC()
+	wf := Workflow{
+		ID:             createWorkflowID(),
+		Key:            strings.TrimSpace(input.Key),
+		Name:           strings.TrimSpace(input.Name),
+		Description:    strings.TrimSpace(input.Description),
+		IsDefault:      false,
+		TransitionMode: input.TransitionMode,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := s.repo.UpsertWorkflow(ctx, wf); err != nil {
+		return mutationError(err.Error()), err
+	}
+	return mutationResult(0, "workflow 已创建。"), nil
+}
+
+func (s *Service) UpdateWorkflow(ctx context.Context, id string, input WorkflowUpdateInput, actor string) (MutationResult, error) {
+	if strings.TrimSpace(id) == "" {
+		return mutationError("workflow 不存在。"), nil
+	}
+	catalog, err := s.repo.ListWorkflowCatalog(ctx)
+	if err != nil {
+		return MutationResult{}, err
+	}
+	wf := findWorkflowByID(catalog, id)
+	if wf == nil {
+		return mutationError("workflow 不存在。"), nil
+	}
+	if input.Name != nil {
+		wf.Name = strings.TrimSpace(*input.Name)
+	}
+	if input.Description != nil {
+		wf.Description = strings.TrimSpace(*input.Description)
+	}
+	if input.TransitionMode != nil {
+		mode := strings.TrimSpace(*input.TransitionMode)
+		if mode != "strict" && mode != "free" {
+			return mutationError("transitionMode 必须是 strict 或 free。"), nil
+		}
+		wf.TransitionMode = mode
+	}
+	wf.UpdatedAt = time.Now().UTC()
+	if err := s.repo.UpsertWorkflow(ctx, *wf); err != nil {
+		return mutationError(err.Error()), err
+	}
+	return mutationResult(0, "workflow 已更新。"), nil
+}
+
+func (s *Service) DeleteWorkflow(ctx context.Context, id string, actor string) (MutationResult, error) {
+	if strings.TrimSpace(id) == "" {
+		return mutationError("workflow 不存在。"), nil
+	}
+	if id == DefaultWorkflowID {
+		return mutationError("不能删除默认 workflow。"), nil
+	}
+	if err := s.repo.SoftDeleteWorkflow(ctx, id); err != nil {
+		return mutationError(err.Error()), err
+	}
+	return mutationResult(0, "workflow 已删除。"), nil
+}
+
+func createWorkflowID() string {
+	return "wf-" + strings.ToLower(hex.EncodeToString([]byte(time.Now().UTC().Format("20060102150405.000000000"))))
+}
+
 
 func validTeamRole(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {

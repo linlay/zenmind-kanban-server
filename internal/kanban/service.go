@@ -67,6 +67,8 @@ type Repository interface {
 	CreateReviewComment(ctx context.Context, input ReviewCommentInput, actor string) (int64, error)
 	UpdateReviewComment(ctx context.Context, id string, input ReviewCommentUpdateInput, actor string) (int64, error)
 	DeleteReviewComment(ctx context.Context, id string, actor string) (int64, error)
+	UpsertWorkflow(ctx context.Context, wf Workflow) error
+	SoftDeleteWorkflow(ctx context.Context, id string) error
 }
 
 type Service struct {
