@@ -87,7 +87,7 @@ func TestServiceLocksMoveWhileRunActive(t *testing.T) {
 	}
 }
 
-func TestServiceMovesAssistantCompletionToReview(t *testing.T) {
+func TestServiceMovesAssistantCompletionToCompletedWhenReviewNotRequired(t *testing.T) {
 	service, closeStore := newTestService(t)
 	defer closeStore()
 	issue := createIssue(t, service, "Assistant task")
@@ -111,11 +111,50 @@ func TestServiceMovesAssistantCompletionToReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.OK || result.Issue == nil || result.Issue.Status != kanban.StatusInReview {
-		t.Fatalf("expected assistant event to move issue to review: %#v", result)
+	if !result.OK || result.Issue == nil || result.Issue.Status != kanban.StatusCompleted {
+		t.Fatalf("expected assistant event to move issue to completed: %#v", result)
 	}
 	if result.Issue.RunID != nil {
 		t.Fatalf("expected run id to be cleared")
+	}
+}
+
+func TestServiceMovesAssistantCompletionToReviewWhenReviewRequired(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	issue := createIssue(t, service, "Assistant task")
+	reviewRequired := true
+	_, err := service.UpdateIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, kanban.IssueUpdateInput{
+		ReviewRequired: &reviewRequired,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatID := "chat-review"
+	runID := "run-review"
+	_, err = service.StartRun(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, strPtr("agent"), kanban.StartRunResult{
+		OK:      true,
+		Message: "started",
+		ChatID:  &chatID,
+		RunID:   &runID,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.SyncAssistantEvent(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.AssistantEvent{
+		Type:   "run.complete",
+		ChatID: &chatID,
+		RunID:  &runID,
+	}, "desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Issue == nil || result.Issue.Status != kanban.StatusInReview {
+		t.Fatalf("expected assistant event to move review-required issue to review: %#v", result)
+	}
+	if !result.Issue.ReviewRequired {
+		t.Fatalf("expected reviewRequired to remain true")
 	}
 }
 

@@ -387,6 +387,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`CREATE TABLE IF NOT EXISTS desktop_client (
 			SESSION_ID_ TEXT PRIMARY KEY,
+			DEVICE_ID_ TEXT,
+			CURRENT_USER_ID_ TEXT,
+			CURRENT_USER_NAME_ TEXT,
 			CAPABILITIES_JSON_ TEXT NOT NULL DEFAULT '[]',
 			SELECTED_PROJECT_ID_ TEXT,
 			CONNECTED_AT_ TEXT NOT NULL,
@@ -410,10 +413,19 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateWorkflowStatusColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateAddWorkflowTransitionModeColumn(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateDropLegacyIssueTypeColumn(ctx); err != nil {
+		return err
+	}
 	if err := s.migrateLegacyIssues(ctx); err != nil {
 		return err
 	}
 	if err := s.migrateLegacyRevision(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateAddDesktopClientMetadataColumns(ctx); err != nil {
 		return err
 	}
 	if err := s.rebuildProjectClosure(ctx); err != nil {
@@ -496,6 +508,40 @@ func (s *Store) migrateWorkflowStatusColumns(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) migrateAddWorkflowTransitionModeColumn(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `ALTER TABLE workflow ADD COLUMN TRANSITION_MODE_ TEXT NOT NULL DEFAULT 'strict' CHECK (TRANSITION_MODE_ IN ('strict', 'free'))`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) migrateAddDesktopClientMetadataColumns(ctx context.Context) error {
+	columns := []string{
+		`ALTER TABLE desktop_client ADD COLUMN DEVICE_ID_ TEXT`,
+		`ALTER TABLE desktop_client ADD COLUMN CURRENT_USER_ID_ TEXT`,
+		`ALTER TABLE desktop_client ADD COLUMN CURRENT_USER_NAME_ TEXT`,
+	}
+	for _, statement := range columns {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) migrateDropLegacyIssueTypeColumn(ctx context.Context) error {
+	columns, err := s.tableColumns(ctx, "issue")
+	if err != nil {
+		return err
+	}
+	if !columns["TYPE_ID_"] {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE issue DROP COLUMN TYPE_ID_`)
+	return err
 }
 
 func (s *Store) EnsureDefaultProject(ctx context.Context) error {
@@ -1026,7 +1072,7 @@ func (s *Store) ListWorkflowCatalog(ctx context.Context) (kanban.WorkflowCatalog
 	if err != nil {
 		return catalog, err
 	}
-catalog.Teams, err = s.listTeams(ctx)
+	catalog.Teams, err = s.listTeams(ctx)
 	if err != nil {
 		return catalog, err
 	}
@@ -1524,7 +1570,7 @@ func (s *Store) Revision(ctx context.Context, boardID string) (int64, error) {
 	return revision, err
 }
 
-func (s *Store) SaveDesktopClient(ctx context.Context, sessionID string, capabilities []string, selectedProjectID string) error {
+func (s *Store) SaveDesktopClient(ctx context.Context, sessionID string, deviceID string, currentUserID string, currentUserName string, capabilities []string, selectedProjectID string) error {
 	data, err := json.Marshal(capabilities)
 	if err != nil {
 		return err
@@ -1534,13 +1580,16 @@ func (s *Store) SaveDesktopClient(ctx context.Context, sessionID string, capabil
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO desktop_client (SESSION_ID_, CAPABILITIES_JSON_, SELECTED_PROJECT_ID_, CONNECTED_AT_, LAST_SEEN_AT_)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO desktop_client (SESSION_ID_, DEVICE_ID_, CURRENT_USER_ID_, CURRENT_USER_NAME_, CAPABILITIES_JSON_, SELECTED_PROJECT_ID_, CONNECTED_AT_, LAST_SEEN_AT_)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(SESSION_ID_) DO UPDATE SET
+			DEVICE_ID_ = excluded.DEVICE_ID_,
+			CURRENT_USER_ID_ = excluded.CURRENT_USER_ID_,
+			CURRENT_USER_NAME_ = excluded.CURRENT_USER_NAME_,
 			CAPABILITIES_JSON_ = excluded.CAPABILITIES_JSON_,
 			SELECTED_PROJECT_ID_ = excluded.SELECTED_PROJECT_ID_,
 			LAST_SEEN_AT_ = excluded.LAST_SEEN_AT_
-	`, sessionID, string(data), selectedProjectID, now, now)
+	`, sessionID, nullIfEmpty(deviceID), nullIfEmpty(currentUserID), nullIfEmpty(currentUserName), string(data), selectedProjectID, now, now)
 	return err
 }
 
@@ -2411,10 +2460,10 @@ func (t transitionSeed) ID(workflowID string, position int) string {
 func workflowSeeds() []workflowSeed {
 	return []workflowSeed{
 		{
-			ID:          kanban.DefaultWorkflowID,
-			Key:         kanban.DefaultWorkflowKey,
-			Name:        "标准需求",
-			Description: "标准需求从澄清、设计、开发、测试到发布的完整交付流程。",
+			ID:             kanban.DefaultWorkflowID,
+			Key:            kanban.DefaultWorkflowKey,
+			Name:           "标准需求",
+			Description:    "标准需求从澄清、设计、开发、测试到发布的完整交付流程。",
 			TransitionMode: "strict",
 			Stages: []stageSeed{
 				{"requirement_clarification", "需求澄清"},
@@ -2426,10 +2475,10 @@ func workflowSeeds() []workflowSeed {
 			ReviewStages: map[int]bool{0: true, 1: true, 2: true, 3: true},
 		},
 		{
-			ID:          "workflow-bug-fix",
-			Key:         "bug_fix",
-			Name:        "BUG 修复",
-			Description: "缺陷分诊、复现定位、修复、回归与发布流程。",
+			ID:             "workflow-bug-fix",
+			Key:            "bug_fix",
+			Name:           "BUG 修复",
+			Description:    "缺陷分诊、复现定位、修复、回归与发布流程。",
 			TransitionMode: "strict",
 			Stages: []stageSeed{
 				{"issue_triage", "问题分诊"},
@@ -2441,10 +2490,10 @@ func workflowSeeds() []workflowSeed {
 			ReviewStages: map[int]bool{2: true, 3: true},
 		},
 		{
-			ID:          "workflow-optimization-iteration",
-			Key:         "optimization_iteration",
-			Name:        "优化迭代",
-			Description: "围绕现状、方案、实现、验证和灰度发布的优化流程。",
+			ID:             "workflow-optimization-iteration",
+			Key:            "optimization_iteration",
+			Name:           "优化迭代",
+			Description:    "围绕现状、方案、实现、验证和灰度发布的优化流程。",
 			TransitionMode: "strict",
 			Stages: []stageSeed{
 				{"current_assessment", "现状评估"},
@@ -2470,10 +2519,10 @@ func workflowSeeds() []workflowSeed {
 			ReviewStages: map[int]bool{1: true},
 		},
 		{
-			ID:          "workflow-graphic-publish",
-			Key:         "graphic_publish",
-			Name:        "图文制作发布",
-			Description: "图文选题、文案、视觉、审校和发布投放流程。",
+			ID:             "workflow-graphic-publish",
+			Key:            "graphic_publish",
+			Name:           "图文制作发布",
+			Description:    "图文选题、文案、视觉、审校和发布投放流程。",
 			TransitionMode: "strict",
 			Stages: []stageSeed{
 				{"topic_planning", "选题策划"},
