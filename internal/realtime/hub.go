@@ -39,6 +39,16 @@ type Hub struct {
 	pending         map[string]chan Envelope
 }
 
+type desktopAgentLoadResult struct {
+	agents []kanban.DesktopAgentOption
+	err    error
+}
+
+type desktopAgentListPayload struct {
+	Items  []kanban.DesktopAgentOption `json:"items"`
+	Agents []kanban.DesktopAgentOption `json:"agents"`
+}
+
 func NewHub(cfg config.Config, service *kanban.Service, store *store.Store, logger *slog.Logger) *Hub {
 	return &Hub{
 		cfg:             cfg,
@@ -479,6 +489,8 @@ func (h *Hub) handle(session *Session, env Envelope) {
 			return
 		}
 		session.respond(env, map[string]any{"ok": true, "items": items})
+	case "desktop.online.list":
+		h.desktopOnlineList(session, env)
 	case "desktop.assistant.listAgents":
 		h.forwardDesktop(session, env, "desktop.assistant.listAgents")
 	case "kanban.workflow.create":
@@ -666,7 +678,7 @@ func (h *Hub) assignAndRun(session *Session, env Envelope) {
 		"agentKey": agentKey,
 		"message":  buildAssistantPrompt(*issue),
 	}
-	response, err := h.requestDesktop("desktop.assistant.startRun", env.BoardID, env.ProjectID, payload)
+	response, err := h.requestDesktop("desktop.assistant.startRun", env.BoardID, env.ProjectID, "", payload)
 	if err != nil {
 		result := kanban.ChangeResult{OK: false, Message: err.Error(), BoardID: env.BoardID, Revision: snapshot.Revision, Issues: snapshot.Issues}
 		session.respond(env, result)
@@ -712,7 +724,7 @@ func (h *Hub) dispatchToDesktop(session *Session, env Envelope) {
 			return
 		}
 	}
-	response, err := h.requestDesktop("desktop.kanban.issue.dispatch", env.BoardID, env.ProjectID, map[string]any{
+	response, err := h.requestDesktop("desktop.kanban.issue.dispatch", env.BoardID, env.ProjectID, "", map[string]any{
 		"issue": issue,
 	})
 	if err != nil {
@@ -730,7 +742,7 @@ func (h *Hub) dispatchToDesktop(session *Session, env Envelope) {
 }
 
 func (h *Hub) forwardDesktop(session *Session, env Envelope, op string) {
-	response, err := h.requestDesktop(op, env.BoardID, env.ProjectID, json.RawMessage(env.Payload))
+	response, err := h.requestDesktop(op, env.BoardID, env.ProjectID, "", json.RawMessage(env.Payload))
 	if err != nil {
 		session.respondError(env, "desktop_unavailable", err.Error())
 		return
@@ -756,18 +768,21 @@ func (h *Hub) desktopHello(session *Session, env Envelope) {
 		SelectedProjectID string             `json:"selectedProjectId"`
 		CurrentUser       DesktopCurrentUser `json:"currentUser"`
 		Scope             string             `json:"scope"`
+		DeviceID          string             `json:"deviceId"`
 	}
 	_ = json.Unmarshal(env.Payload, &payload)
 	session.capabilities = payload.Capabilities
 	session.currentUser = payload.CurrentUser
+	session.deviceID = strings.TrimSpace(payload.DeviceID)
 	session.scope = strings.TrimSpace(payload.Scope)
+	session.lastSeenAt = time.Now().UTC()
 	if strings.TrimSpace(payload.SelectedProjectID) != "" {
 		session.projectID = strings.TrimSpace(payload.SelectedProjectID)
 	}
 	h.mu.Lock()
 	h.desktopSessions[session.id] = session
 	h.mu.Unlock()
-	if err := h.store.SaveDesktopClient(context.Background(), session.id, payload.Capabilities, session.projectID); err != nil {
+	if err := h.store.SaveDesktopClient(context.Background(), session.id, session.deviceID, session.currentUser.ID, session.currentUser.Name, payload.Capabilities, session.projectID); err != nil {
 		h.logger.Warn("failed to save desktop client", "error", err)
 	}
 	session.respond(env, map[string]any{
@@ -793,10 +808,33 @@ func (h *Hub) desktopAssistantEvent(session *Session, env Envelope) {
 	h.respondChange(session, env, result, err, "kanban.issue.updated")
 }
 
-func (h *Hub) requestDesktop(op string, boardID string, projectID string, payload any) (Envelope, error) {
-	desktop := h.pickDesktop()
-	if desktop == nil {
-		return Envelope{}, errors.New("desktop 未在线。")
+func (h *Hub) desktopOnlineList(session *Session, env Envelope) {
+	status := h.DesktopStatus()
+	agentResults := make(map[string]desktopAgentLoadResult, len(status.Sessions))
+	for _, desktopSession := range status.Sessions {
+		response, err := h.requestDesktop("desktop.assistant.listAgents", env.BoardID, env.ProjectID, desktopSession.SessionID, map[string]any{})
+		if err != nil {
+			agentResults[desktopSession.SessionID] = desktopAgentLoadResult{err: err}
+			continue
+		}
+		var payload desktopAgentListPayload
+		if err := json.Unmarshal(response.Payload, &payload); err != nil {
+			agentResults[desktopSession.SessionID] = desktopAgentLoadResult{err: errors.New("desktop agent 列表返回格式无效。")}
+			continue
+		}
+		agents := payload.Items
+		if len(agents) == 0 {
+			agents = payload.Agents
+		}
+		agentResults[desktopSession.SessionID] = desktopAgentLoadResult{agents: agents}
+	}
+	session.respond(env, buildDesktopOnlineList(status, agentResults))
+}
+
+func (h *Hub) requestDesktop(op string, boardID string, projectID string, targetDesktopSessionID string, payload any) (Envelope, error) {
+	desktop, err := h.pickDesktop(targetDesktopSessionID)
+	if err != nil {
+		return Envelope{}, err
 	}
 	id := randomID()
 	ch := make(chan Envelope, 1)
@@ -906,24 +944,136 @@ func (h *Hub) broadcastDesktopStatus() {
 func (h *Hub) DesktopStatus() kanban.DesktopStatus {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	sessions := make([]kanban.DesktopSessionStatus, 0, len(h.desktopSessions))
 	for _, session := range h.desktopSessions {
-		return kanban.DesktopStatus{
-			Online:            true,
-			SessionID:         session.id,
-			Capabilities:      append([]string(nil), session.capabilities...),
-			SelectedProjectID: session.projectID,
+		lastSeenAt := session.lastSeenAt
+		if lastSeenAt.IsZero() {
+			lastSeenAt = time.Now().UTC()
 		}
+		sessions = append(sessions, kanban.DesktopSessionStatus{
+			SessionID:         session.id,
+			DeviceID:          session.deviceID,
+			CurrentUserID:     strings.TrimSpace(session.currentUser.ID),
+			CurrentUserName:   strings.TrimSpace(session.currentUser.Name),
+			SelectedProjectID: session.projectID,
+			Capabilities:      append([]string(nil), session.capabilities...),
+			LastSeenAt:        lastSeenAt,
+		})
 	}
-	return kanban.DesktopStatus{Online: false, Capabilities: []string{}}
+	status := kanban.DesktopStatus{Online: len(sessions) > 0, Capabilities: []string{}, Sessions: sessions}
+	if len(sessions) > 0 {
+		first := sessions[0]
+		status.SessionID = first.SessionID
+		status.Capabilities = append([]string(nil), first.Capabilities...)
+		status.SelectedProjectID = first.SelectedProjectID
+	}
+	return status
 }
 
-func (h *Hub) pickDesktop() *Session {
+func buildDesktopOnlineList(status kanban.DesktopStatus, agentResults map[string]desktopAgentLoadResult) kanban.DesktopOnlineListResult {
+	type onlineDeviceAccumulator struct {
+		device       kanban.DesktopOnlineDevice
+		capabilities map[string]bool
+		agents       map[string]bool
+	}
+
+	order := []string{}
+	devices := map[string]*onlineDeviceAccumulator{}
+	for _, desktopSession := range status.Sessions {
+		deviceID := strings.TrimSpace(desktopSession.DeviceID)
+		if deviceID == "" {
+			deviceID = "session:" + strings.TrimSpace(desktopSession.SessionID)
+		}
+		item := devices[deviceID]
+		if item == nil {
+			item = &onlineDeviceAccumulator{
+				device: kanban.DesktopOnlineDevice{
+					DeviceID:          deviceID,
+					CurrentUserID:     strings.TrimSpace(desktopSession.CurrentUserID),
+					CurrentUserName:   strings.TrimSpace(desktopSession.CurrentUserName),
+					SelectedProjectID: strings.TrimSpace(desktopSession.SelectedProjectID),
+					Capabilities:      []string{},
+					LastSeenAt:        desktopSession.LastSeenAt,
+					Sessions:          []kanban.DesktopSessionStatus{},
+					Agents:            []kanban.DesktopAgentOption{},
+				},
+				capabilities: map[string]bool{},
+				agents:       map[string]bool{},
+			}
+			devices[deviceID] = item
+			order = append(order, deviceID)
+		}
+		item.device.Sessions = append(item.device.Sessions, desktopSession)
+		if desktopSession.LastSeenAt.After(item.device.LastSeenAt) {
+			item.device.LastSeenAt = desktopSession.LastSeenAt
+		}
+		for _, capability := range desktopSession.Capabilities {
+			capability = strings.TrimSpace(capability)
+			if capability == "" || item.capabilities[capability] {
+				continue
+			}
+			item.capabilities[capability] = true
+			item.device.Capabilities = append(item.device.Capabilities, capability)
+		}
+		result := agentResults[desktopSession.SessionID]
+		if result.err != nil && item.device.AgentError == "" {
+			item.device.AgentError = result.err.Error()
+		}
+		for _, agent := range result.agents {
+			agent.AgentKey = strings.TrimSpace(agent.AgentKey)
+			agent.DisplayName = strings.TrimSpace(agent.DisplayName)
+			agent.Role = strings.TrimSpace(agent.Role)
+			if agent.AgentKey == "" || item.agents[agent.AgentKey] {
+				continue
+			}
+			if agent.DisplayName == "" {
+				agent.DisplayName = agent.AgentKey
+			}
+			item.agents[agent.AgentKey] = true
+			item.device.Agents = append(item.device.Agents, agent)
+		}
+	}
+
+	devicesList := make([]kanban.DesktopOnlineDevice, 0, len(order))
+	agentCount := 0
+	sessionCount := 0
+	for _, deviceID := range order {
+		device := devices[deviceID].device
+		sessionCount += len(device.Sessions)
+		agentCount += len(device.Agents)
+		devicesList = append(devicesList, device)
+	}
+	return kanban.DesktopOnlineListResult{
+		OK:           true,
+		Online:       status.Online,
+		DeviceCount:  len(devicesList),
+		SessionCount: sessionCount,
+		AgentCount:   agentCount,
+		Devices:      devicesList,
+	}
+}
+
+func (h *Hub) pickDesktop(targetDesktopSessionID string) (*Session, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	for _, session := range h.desktopSessions {
-		return session
+	targetDesktopSessionID = strings.TrimSpace(targetDesktopSessionID)
+	if targetDesktopSessionID != "" {
+		session := h.desktopSessions[targetDesktopSessionID]
+		if session == nil {
+			return nil, errors.New("目标 Desktop 未在线。")
+		}
+		return session, nil
 	}
-	return nil
+	if len(h.desktopSessions) == 0 {
+		return nil, errors.New("desktop 未在线。")
+	}
+	if len(h.desktopSessions) > 1 {
+		return nil, errors.New("多个 Desktop 在线，请选择目标 Desktop。")
+	}
+	for _, session := range h.desktopSessions {
+		return session, nil
+	}
+	return nil, errors.New("desktop 未在线。")
 }
 
 func (h *Hub) authorized(r *http.Request) bool {

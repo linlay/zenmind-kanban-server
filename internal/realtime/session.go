@@ -15,9 +15,11 @@ type Session struct {
 	role         string
 	board        string
 	projectID    string
+	deviceID     string
 	currentUser  DesktopCurrentUser
 	scope        string
 	capabilities []string
+	lastSeenAt   time.Time
 	conn         *websocket.Conn
 	hub          *Hub
 	send         chan OutEnvelope
@@ -64,6 +66,9 @@ func (s *Session) readPump() {
 		}
 		if env.ProjectID == "" {
 			env.ProjectID = s.projectID
+		}
+		if s.role == "desktop" {
+			s.lastSeenAt = time.Now().UTC()
 		}
 		s.hub.handle(s, env)
 	}

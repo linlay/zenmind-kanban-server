@@ -220,10 +220,49 @@ type StartRunResult struct {
 }
 
 type DesktopStatus struct {
-	Online            bool     `json:"online"`
-	SessionID         string   `json:"sessionId,omitempty"`
-	Capabilities      []string `json:"capabilities"`
-	SelectedProjectID string   `json:"selectedProjectId,omitempty"`
+	Online            bool                   `json:"online"`
+	SessionID         string                 `json:"sessionId,omitempty"`
+	Capabilities      []string               `json:"capabilities"`
+	SelectedProjectID string                 `json:"selectedProjectId,omitempty"`
+	Sessions          []DesktopSessionStatus `json:"sessions,omitempty"`
+}
+
+type DesktopSessionStatus struct {
+	SessionID         string    `json:"sessionId"`
+	DeviceID          string    `json:"deviceId,omitempty"`
+	CurrentUserID     string    `json:"currentUserId,omitempty"`
+	CurrentUserName   string    `json:"currentUserName,omitempty"`
+	SelectedProjectID string    `json:"selectedProjectId,omitempty"`
+	Capabilities      []string  `json:"capabilities"`
+	LastSeenAt        time.Time `json:"lastSeenAt"`
+}
+
+type DesktopAgentOption struct {
+	AgentKey    string         `json:"agentKey"`
+	DisplayName string         `json:"displayName"`
+	Role        string         `json:"role,omitempty"`
+	Icon        map[string]any `json:"icon,omitempty"`
+}
+
+type DesktopOnlineDevice struct {
+	DeviceID          string                 `json:"deviceId"`
+	CurrentUserID     string                 `json:"currentUserId,omitempty"`
+	CurrentUserName   string                 `json:"currentUserName,omitempty"`
+	SelectedProjectID string                 `json:"selectedProjectId,omitempty"`
+	Capabilities      []string               `json:"capabilities"`
+	LastSeenAt        time.Time              `json:"lastSeenAt"`
+	Sessions          []DesktopSessionStatus `json:"sessions"`
+	Agents            []DesktopAgentOption   `json:"agents"`
+	AgentError        string                 `json:"agentError,omitempty"`
+}
+
+type DesktopOnlineListResult struct {
+	OK           bool                  `json:"ok"`
+	Online       bool                  `json:"online"`
+	DeviceCount  int                   `json:"deviceCount"`
+	SessionCount int                   `json:"sessionCount"`
+	AgentCount   int                   `json:"agentCount"`
+	Devices      []DesktopOnlineDevice `json:"devices"`
 }
 
 type ListResult struct {
