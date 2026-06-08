@@ -29,6 +29,22 @@ go run ./cmd/server
 go test ./...
 ```
 
+### 生成 SQLite 数据库
+
+基础库包含完整表结构、索引、工作流目录、默认项目和默认看板：
+
+```bash
+scripts/create-sqlite-db.sh --db ./data/kanban.db
+```
+
+追加演示项目和 issues：
+
+```bash
+scripts/create-sqlite-db.sh --db ./data/kanban.db --demo --force
+```
+
+脚本默认拒绝覆盖已有数据库；需要重建时传入 `--force`，会同时清理 `.db-wal` 和 `.db-shm`。
+
 ## 3. 配置说明
 
 本项目的主要配置放在 `.env`，配置契约放在 `.env.example`。`.env` 只用于本地真实值，不提交。

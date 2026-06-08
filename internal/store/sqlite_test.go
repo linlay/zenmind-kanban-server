@@ -4,9 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"zenmind-kanban-server/internal/kanban"
 )
 
 func TestMigrationCreatesDomainTablesWithUppercaseColumns(t *testing.T) {
@@ -86,6 +90,180 @@ func TestMigrationCreatesDomainTablesWithUppercaseColumns(t *testing.T) {
 		if columnCount == 0 {
 			t.Fatalf("expected table %s to have columns", table)
 		}
+	}
+}
+
+func TestSchemaCreatesFinalWorkflowColumns(t *testing.T) {
+	sqliteStore, err := Open(context.Background(), filepath.Join(t.TempDir(), "kanban.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteStore.Close()
+
+	expected := map[string][]string{
+		"workflow":            {"TRANSITION_MODE_"},
+		"workflow_status":     {"STAGE_ID_", "IS_ACTIVE_"},
+		"workflow_transition": {"IS_ACTIVE_"},
+		"issue":               {"SEVERITY_"},
+		"desktop_client":      {"DEVICE_ID_", "CURRENT_USER_ID_", "CURRENT_USER_NAME_"},
+	}
+	for table, columns := range expected {
+		for _, column := range columns {
+			var count int
+			if err := sqliteStore.db.QueryRowContext(context.Background(), `
+				SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?
+			`, table, column).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 {
+				t.Fatalf("expected %s.%s to exist", table, column)
+			}
+		}
+	}
+}
+
+func TestWorkflowStatusContractForIssueStatusFields(t *testing.T) {
+	ctx := context.Background()
+	sqliteStore, err := Open(ctx, filepath.Join(t.TempDir(), "kanban.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteStore.Close()
+
+	if err := sqliteStore.SeedWorkflowCatalog(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqliteStore.SeedDefaults(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	allowed := map[string]bool{
+		"backlog": true, "todo": true, "in_progress": true, "in_review": true, "completed": true,
+	}
+	rows, err := sqliteStore.db.QueryContext(ctx, `
+		SELECT KEY_, NAME_, COLUMN_KEY_
+		FROM workflow_status
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, name, columnKey string
+		if err := rows.Scan(&key, &name, &columnKey); err != nil {
+			t.Fatal(err)
+		}
+		if !allowed[key] {
+			t.Fatalf("unexpected workflow_status KEY_: %s", key)
+		}
+		if strings.TrimSpace(name) == "" {
+			t.Fatalf("workflow_status %s has empty NAME_", key)
+		}
+		if !allowed[columnKey] {
+			t.Fatalf("unexpected workflow_status COLUMN_KEY_: %s", columnKey)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	issue := kanban.Issue{
+		BoardID:        kanban.DefaultBoardID,
+		ProjectID:      kanban.DefaultProjectID,
+		WorkflowID:     kanban.DefaultWorkflowID,
+		StageID:        "workflow-standard-requirement-stage-requirement_clarification",
+		StatusID:       "workflow-standard-requirement-status-in_review",
+		ID:             "status-contract-issue",
+		Title:          "Status contract issue",
+		Description:    "",
+		Status:         kanban.StatusInReview,
+		Priority:       kanban.PriorityMedium,
+		Severity:       kanban.SeverityMedium,
+		Position:       1,
+		ReviewRequired: true,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if _, err := sqliteStore.ReplaceIssue(ctx, kanban.DefaultBoardID, issue, "test.issue.created", "test"); err != nil {
+		t.Fatal(err)
+	}
+	issues, _, err := sqliteStore.ListIssues(ctx, kanban.DefaultBoardID, kanban.DefaultProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(issues))
+	}
+	got := issues[0]
+	if got.StatusID != issue.StatusID {
+		t.Fatalf("statusId mismatch: got %s want %s", got.StatusID, issue.StatusID)
+	}
+	if got.StatusKey != "in_review" {
+		t.Fatalf("statusKey mismatch: got %s", got.StatusKey)
+	}
+	if got.StatusName != "待审查" {
+		t.Fatalf("statusName mismatch: got %s", got.StatusName)
+	}
+	if got.Status != kanban.StatusInReview {
+		t.Fatalf("status mismatch: got %s", got.Status)
+	}
+	if got.ColumnKey != "in_review" {
+		t.Fatalf("columnKey mismatch: got %s", got.ColumnKey)
+	}
+}
+
+func TestDemoSQLResolvesIssueStatusFields(t *testing.T) {
+	ctx := context.Background()
+	sqliteStore, err := Open(ctx, filepath.Join(t.TempDir(), "kanban.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteStore.Close()
+
+	if err := sqliteStore.SeedWorkflowCatalog(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqliteStore.SeedDefaults(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, file := range []string{
+		filepath.Join("..", "..", "cmd", "demo", "01_projects.sql"),
+		filepath.Join("..", "..", "cmd", "demo", "02_issues.sql"),
+	} {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sql := strings.ReplaceAll(string(data), "__NOW__", now)
+		if err := executeSQLScript(ctx, sqliteStore.db, sql, "demo sql"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var issueCount int
+	if err := sqliteStore.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM issue WHERE ID_ LIKE 'demo-issue-%'
+	`).Scan(&issueCount); err != nil {
+		t.Fatal(err)
+	}
+	if issueCount == 0 {
+		t.Fatal("expected demo issues to be inserted")
+	}
+
+	var missingStatusCount int
+	if err := sqliteStore.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM issue i
+		LEFT JOIN workflow_status wst ON wst.ID_ = i.STATUS_ID_
+		WHERE i.ID_ LIKE 'demo-issue-%'
+			AND (wst.ID_ IS NULL OR wst.KEY_ = '' OR wst.NAME_ = '')
+	`).Scan(&missingStatusCount); err != nil {
+		t.Fatal(err)
+	}
+	if missingStatusCount != 0 {
+		t.Fatalf("expected all demo issues to resolve statusKey/statusName, got %d missing", missingStatusCount)
 	}
 }
 

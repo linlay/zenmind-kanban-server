@@ -40,16 +40,11 @@ func main() {
 	}
 	fmt.Println("  ✓ 工作流目录")
 
-	if err := st.EnsureDefaultProject(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "确保默认项目失败: %v\n", err)
+	if err := st.SeedDefaults(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "确保默认项目和看板失败: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("  ✓ 默认项目")
-
-	if err := st.EnsureDefaultBoard(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "确保默认看板失败: %v\n", err)
-		os.Exit(1)
-	}
 	fmt.Println("  ✓ 默认看板")
 
 	// 直接开数据库连接执行原始 SQL

@@ -21,8 +21,14 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+//go:embed schema.sql
+var schemaSQL string
+
 //go:embed workflow_seed.sql
 var workflowSeedSQL string
+
+//go:embed seed_defaults.sql
+var seedDefaultsSQL string
 
 type Store struct {
 	db   *sql.DB
@@ -54,6 +60,9 @@ func (s *Store) Path() string {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
+	if err := executeSchemaScript(ctx, s.db); err != nil {
+		return err
+	}
 	statements := []string{
 		`PRAGMA busy_timeout = 3000`,
 		`PRAGMA journal_mode = WAL`,
@@ -493,6 +502,36 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
+func executeSQLScript(ctx context.Context, db *sql.DB, script string, label string) error {
+	for _, statement := range splitSQL(script) {
+		statement = strings.TrimSpace(statement)
+		if statement == "" || strings.HasPrefix(statement, "--") {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("%s: %w\nSQL: %s", label, err, statement)
+		}
+	}
+	return nil
+}
+
+func executeSchemaScript(ctx context.Context, db *sql.DB) error {
+	for _, statement := range splitSQL(schemaSQL) {
+		statement = strings.TrimSpace(statement)
+		if statement == "" || strings.HasPrefix(statement, "--") {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			upper := strings.ToUpper(statement)
+			if strings.HasPrefix(upper, "CREATE INDEX") && strings.Contains(err.Error(), "no such column") {
+				continue
+			}
+			return fmt.Errorf("schema: %w\nSQL: %s", err, statement)
+		}
+	}
+	return nil
+}
+
 func (s *Store) migrateAddSeverityColumn(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `ALTER TABLE issue ADD COLUMN SEVERITY_ TEXT NOT NULL DEFAULT 'medium'`)
 	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -579,19 +618,16 @@ func (s *Store) EnsureDefaultBoard(ctx context.Context) error {
 	return err
 }
 
+func (s *Store) SeedDefaults(ctx context.Context) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	sql := strings.ReplaceAll(seedDefaultsSQL, "__NOW__", now)
+	return executeSQLScript(ctx, s.db, sql, "seed defaults")
+}
+
 func (s *Store) SeedWorkflowCatalog(ctx context.Context) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	sql := strings.ReplaceAll(workflowSeedSQL, "__NOW__", now)
-	for _, statement := range splitSQL(sql) {
-		statement = strings.TrimSpace(statement)
-		if statement == "" || strings.HasPrefix(statement, "--") {
-			continue
-		}
-		if _, err := s.db.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("seed workflow: %w\nSQL: %s", err, statement)
-		}
-	}
-	return nil
+	return executeSQLScript(ctx, s.db, sql, "seed workflow")
 }
 
 func splitSQL(s string) []string {
@@ -2306,10 +2342,10 @@ func replaceAttachmentsTx(ctx context.Context, tx *sql.Tx, issueID string, attac
 
 var workflowStartStageKeys = map[string]string{
 	"workflow-standard-requirement":   "requirement_clarification",
-	"workflow-bug-fix":               "issue_triage",
+	"workflow-bug-fix":                "issue_triage",
 	"workflow-optimization-iteration": "current_assessment",
-	"workflow-free-task":             "todo",
-	"workflow-graphic-publish":       "topic_planning",
+	"workflow-free-task":              "todo",
+	"workflow-graphic-publish":        "topic_planning",
 }
 
 func workflowStartStageID(workflowID string) string {
