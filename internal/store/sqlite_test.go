@@ -254,6 +254,55 @@ func TestDemoSQLResolvesIssueStatusFields(t *testing.T) {
 		t.Fatalf("expected 200 demo issues to be inserted, got %d", issueCount)
 	}
 
+	var rootlessDemoProjectCount int
+	if err := sqliteStore.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM project
+		WHERE ID_ LIKE 'demo-proj-%'
+			AND PARENT_ID_ IS NULL
+	`).Scan(&rootlessDemoProjectCount); err != nil {
+		t.Fatal(err)
+	}
+	if rootlessDemoProjectCount != 0 {
+		t.Fatalf("expected demo projects to be under default root, got %d rootless", rootlessDemoProjectCount)
+	}
+
+	var defaultClosureCount int
+	if err := sqliteStore.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM project_closure
+		WHERE ANCESTOR_ID_ = 'default'
+			AND DESCENDANT_ID_ LIKE 'demo-proj-%'
+	`).Scan(&defaultClosureCount); err != nil {
+		t.Fatal(err)
+	}
+	if defaultClosureCount != 50 {
+		t.Fatalf("expected default closure to include 50 demo projects, got %d", defaultClosureCount)
+	}
+
+	defaultIssues, _, err := sqliteStore.ListIssues(ctx, kanban.DefaultBoardID, kanban.DefaultProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defaultIssues) != 200 {
+		t.Fatalf("expected default project to aggregate 200 demo issues, got %d", len(defaultIssues))
+	}
+
+	projectIssueStats, err := sqliteStore.ListProjectIssueStats(ctx, kanban.DefaultBoardID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultStatCount := -1
+	for _, stat := range projectIssueStats {
+		if stat.ProjectID == kanban.DefaultProjectID {
+			defaultStatCount = stat.IssueCount
+			break
+		}
+	}
+	if defaultStatCount != 200 {
+		t.Fatalf("expected default project issue stats to aggregate 200 demo issues, got %d", defaultStatCount)
+	}
+
 	var longTitleCount int
 	if err := sqliteStore.db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
