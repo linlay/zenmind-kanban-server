@@ -55,6 +55,101 @@ func TestServiceAllowsMoveToCompleted(t *testing.T) {
 	}
 }
 
+func TestServiceSnapshotMarksCompleteProjectScope(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	createIssue(t, service, "Scoped task")
+
+	snapshot, err := service.Snapshot(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.DesktopStatus{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Complete {
+		t.Fatalf("expected complete project snapshot")
+	}
+	if snapshot.Scope != "project" {
+		t.Fatalf("expected project scope, got %q", snapshot.Scope)
+	}
+	if snapshot.ProjectID != kanban.DefaultProjectID {
+		t.Fatalf("expected projectId=%q, got %q", kanban.DefaultProjectID, snapshot.ProjectID)
+	}
+}
+
+func TestServiceRejectsStaleUpdateRevision(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	issue := createIssue(t, service, "Concurrent update")
+	staleRevision := issue.Revision
+	updatedTitle := "Updated elsewhere"
+	if result, err := service.UpdateIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, kanban.IssueUpdateInput{
+		Title: &updatedTitle,
+	}, "first"); err != nil || !result.OK {
+		t.Fatalf("expected first update to succeed: %#v, %v", result, err)
+	}
+
+	nextTitle := "Stale update"
+	result, err := service.UpdateIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, kanban.IssueUpdateInput{
+		Title:             &nextTitle,
+		BaseIssueRevision: &staleRevision,
+	}, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.Code != "conflict" {
+		t.Fatalf("expected conflict for stale update, got %#v", result)
+	}
+	if len(result.Issues) == 0 || !result.Complete || result.Scope != "project" {
+		t.Fatalf("expected conflict response to include project issues, got %#v", result)
+	}
+}
+
+func TestServiceRejectsStaleMoveRevision(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	issue := createIssue(t, service, "Concurrent move")
+	staleRevision := issue.Revision
+	updatedTitle := "Moved elsewhere"
+	if result, err := service.UpdateIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, kanban.IssueUpdateInput{
+		Title: &updatedTitle,
+	}, "first"); err != nil || !result.OK {
+		t.Fatalf("expected first update to succeed: %#v, %v", result, err)
+	}
+
+	result, err := service.MoveIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.MoveInput{
+		ID:                issue.ID,
+		Status:            string(kanban.StatusTodo),
+		Position:          1,
+		BaseIssueRevision: &staleRevision,
+	}, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.Code != "conflict" {
+		t.Fatalf("expected conflict for stale move, got %#v", result)
+	}
+}
+
+func TestServiceRejectsStaleDeleteRevision(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	issue := createIssue(t, service, "Concurrent delete")
+	staleRevision := issue.Revision
+	updatedTitle := "Delete elsewhere"
+	if result, err := service.UpdateIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, kanban.IssueUpdateInput{
+		Title: &updatedTitle,
+	}, "first"); err != nil || !result.OK {
+		t.Fatalf("expected first update to succeed: %#v, %v", result, err)
+	}
+
+	result, err := service.DeleteIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, &staleRevision, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.Code != "conflict" {
+		t.Fatalf("expected conflict for stale delete, got %#v", result)
+	}
+}
+
 func TestServiceLocksMoveWhileRunActive(t *testing.T) {
 	service, closeStore := newTestService(t)
 	defer closeStore()
@@ -155,6 +250,70 @@ func TestServiceMovesAssistantCompletionToReviewWhenReviewRequired(t *testing.T)
 	}
 	if !result.Issue.ReviewRequired {
 		t.Fatalf("expected reviewRequired to remain true")
+	}
+}
+
+func TestServiceMovesAssistantFailureBackToTodo(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	issue := createIssue(t, service, "Failing assistant task")
+	chatID := "chat-fail"
+	runID := "run-fail"
+	_, err := service.StartRun(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, strPtr("agent"), kanban.StartRunResult{
+		OK:      true,
+		Message: "started",
+		ChatID:  &chatID,
+		RunID:   &runID,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.SyncAssistantEvent(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.AssistantEvent{
+		Type:   "run.failed",
+		ChatID: &chatID,
+		RunID:  &runID,
+	}, "desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Issue == nil || result.Issue.Status != kanban.StatusTodo || result.Issue.RunState == nil || *result.Issue.RunState != kanban.RunStateFailed {
+		t.Fatalf("expected failed run to return issue to todo: %#v", result)
+	}
+	if result.Issue.RunID != nil {
+		t.Fatalf("expected failed run id to be cleared")
+	}
+}
+
+func TestServiceMovesAssistantCancelBackToTodo(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	issue := createIssue(t, service, "Cancelled assistant task")
+	chatID := "chat-cancel"
+	runID := "run-cancel"
+	_, err := service.StartRun(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, strPtr("agent"), kanban.StartRunResult{
+		OK:      true,
+		Message: "started",
+		ChatID:  &chatID,
+		RunID:   &runID,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.SyncAssistantEvent(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.AssistantEvent{
+		Type:   "run.cancelled",
+		ChatID: &chatID,
+		RunID:  &runID,
+	}, "desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Issue == nil || result.Issue.Status != kanban.StatusTodo || result.Issue.RunState == nil || *result.Issue.RunState != kanban.RunStateCancelled {
+		t.Fatalf("expected cancelled run to return issue to todo: %#v", result)
+	}
+	if result.Issue.RunID != nil {
+		t.Fatalf("expected cancelled run id to be cleared")
 	}
 }
 

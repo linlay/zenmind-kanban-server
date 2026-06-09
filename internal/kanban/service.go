@@ -75,6 +75,8 @@ type Service struct {
 	repo Repository
 }
 
+const staleRunAfter = 30 * time.Minute
+
 func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
@@ -159,6 +161,18 @@ func (s *Service) Snapshot(ctx context.Context, boardID string, projectID string
 	if err != nil {
 		return ListResult{}, err
 	}
+	if !desktopStatus.Online {
+		expired, err := s.expireStaleRuns(ctx, boardID, projectID, catalog, issues)
+		if err != nil {
+			return ListResult{}, err
+		}
+		if expired {
+			issues, revision, err = s.repo.ListIssues(ctx, boardID, projectID)
+			if err != nil {
+				return ListResult{}, err
+			}
+		}
+	}
 	users, err := s.repo.ListUsers(ctx)
 	if err != nil {
 		return ListResult{}, err
@@ -211,6 +225,8 @@ func (s *Service) Snapshot(ctx context.Context, boardID string, projectID string
 		BoardID:             boardID,
 		ProjectID:           projectID,
 		Revision:            revision,
+		Complete:            true,
+		Scope:               "project",
 		Projects:            projects,
 		Issues:              issues,
 		Users:               users,
@@ -235,6 +251,38 @@ func (s *Service) Snapshot(ctx context.Context, boardID string, projectID string
 		DesktopStatus:       desktopStatus,
 		StoragePath:         s.repo.Path(),
 	}, nil
+}
+
+func (s *Service) expireStaleRuns(ctx context.Context, boardID string, projectID string, catalog WorkflowCatalog, issues []Issue) (bool, error) {
+	now := time.Now().UTC()
+	expired := false
+	for _, issue := range issues {
+		if issue.RunID == nil || strings.TrimSpace(*issue.RunID) == "" {
+			continue
+		}
+		if issue.UpdatedAt.IsZero() || now.Sub(issue.UpdatedAt) < staleRunAfter {
+			continue
+		}
+		next := issue
+		next.RunID = nil
+		failed := RunStateFailed
+		next.RunState = &failed
+		nextStatus := StatusTodo
+		statusRef := resolveStatus(catalog, next.WorkflowID, nil, &nextStatus)
+		next.Status = nextStatus
+		next.StatusID = statusRef.ID
+		next.StatusKey = statusRef.Key
+		next.StatusName = statusRef.Name
+		next.ColumnKey = statusRef.ColumnKey
+		next.UpdatedAt = now
+		systemActor := "system"
+		next.UpdatedBy = &systemActor
+		if _, err := s.repo.ReplaceIssue(ctx, boardID, next, "kanban.issue.run.stale", systemActor); err != nil {
+			return false, err
+		}
+		expired = true
+	}
+	return expired, nil
 }
 
 func (s *Service) ListProjectIssues(ctx context.Context, boardID string, projectID string) (IssuesResult, error) {
@@ -379,6 +427,8 @@ func (s *Service) CreateIssue(ctx context.Context, boardID string, input IssueIn
 		BoardID:   boardID,
 		ProjectID: projectID,
 		Revision:  nextRevision,
+		Complete:  true,
+		Scope:     "project",
 		Issue:     findIssue(issues, issue.ID),
 		Issues:    issues,
 	}, nil
@@ -425,6 +475,9 @@ func (s *Service) MoveIssue(ctx context.Context, boardID string, projectID strin
 	if issue == nil {
 		return changeError(boardID, projectID, revision, current, "issue 不存在。"), nil
 	}
+	if conflict := revisionConflict(boardID, projectID, revision, current, issue, input.BaseIssueRevision); conflict != nil {
+		return *conflict, nil
+	}
 	targetStatus, ok := NormalizeStatus(input.Status)
 	if !ok || !ValidPosition(input.Position) {
 		return changeError(boardID, projectID, revision, current, "issue 移动参数无效。"), nil
@@ -464,20 +517,26 @@ func (s *Service) MoveIssue(ctx context.Context, boardID string, projectID strin
 		BoardID:   boardID,
 		ProjectID: projectID,
 		Revision:  nextRevision,
+		Complete:  true,
+		Scope:     "project",
 		Issue:     findIssue(issues, input.ID),
 		Issues:    issues,
 	}, nil
 }
 
-func (s *Service) DeleteIssue(ctx context.Context, boardID string, projectID string, issueID string, actor string) (ChangeResult, error) {
+func (s *Service) DeleteIssue(ctx context.Context, boardID string, projectID string, issueID string, baseIssueRevision *int64, actor string) (ChangeResult, error) {
 	boardID = normalizeBoardID(boardID)
 	projectID = normalizeProjectID(projectID)
 	current, revision, err := s.repo.ListIssues(ctx, boardID, projectID)
 	if err != nil {
 		return ChangeResult{}, err
 	}
-	if findIssue(current, issueID) == nil {
+	issue := findIssue(current, issueID)
+	if issue == nil {
 		return changeError(boardID, projectID, revision, current, "issue 不存在。"), nil
+	}
+	if conflict := revisionConflict(boardID, projectID, revision, current, issue, baseIssueRevision); conflict != nil {
+		return *conflict, nil
 	}
 	nextRevision, err := s.repo.SoftDeleteIssue(ctx, boardID, issueID, actor)
 	if err != nil {
@@ -493,6 +552,8 @@ func (s *Service) DeleteIssue(ctx context.Context, boardID string, projectID str
 		BoardID:        boardID,
 		ProjectID:      projectID,
 		Revision:       nextRevision,
+		Complete:       true,
+		Scope:          "project",
 		DeletedIssueID: issueID,
 		Issues:         issues,
 	}, nil
@@ -553,6 +614,14 @@ func (s *Service) SyncAssistantEvent(ctx context.Context, boardID string, projec
 		next.StatusName = statusRef.Name
 		next.ColumnKey = statusRef.ColumnKey
 		next.ReviewRequired = next.ReviewRequired || next.Status == StatusInReview
+	} else if *runState == RunStateFailed || *runState == RunStateCancelled {
+		nextStatus := StatusTodo
+		statusRef := resolveStatus(catalog, next.WorkflowID, nil, &nextStatus)
+		next.Status = nextStatus
+		next.StatusID = statusRef.ID
+		next.StatusKey = statusRef.Key
+		next.StatusName = statusRef.Name
+		next.ColumnKey = statusRef.ColumnKey
 	}
 	next.UpdatedAt = time.Now().UTC()
 	next.UpdatedBy = actorPtr(actor)
@@ -570,6 +639,8 @@ func (s *Service) SyncAssistantEvent(ctx context.Context, boardID string, projec
 		BoardID:   boardID,
 		ProjectID: projectID,
 		Revision:  nextRevision,
+		Complete:  true,
+		Scope:     "project",
 		Issue:     findIssue(issues, issue.ID),
 		Issues:    issues,
 	}, nil
@@ -595,6 +666,9 @@ func (s *Service) updateIssue(
 	issue := findIssue(current, issueID)
 	if issue == nil {
 		return changeError(boardID, projectID, revision, current, "issue 不存在。"), nil
+	}
+	if conflict := revisionConflict(boardID, projectID, revision, current, issue, input.BaseIssueRevision); conflict != nil {
+		return *conflict, nil
 	}
 	next := *issue
 	next.Attachments = append([]Attachment(nil), issue.Attachments...)
@@ -796,6 +870,8 @@ func (s *Service) updateIssue(
 		BoardID:   boardID,
 		ProjectID: projectID,
 		Revision:  nextRevision,
+		Complete:  true,
+		Scope:     "project",
 		Issue:     findIssue(issues, issueID),
 		Issues:    issues,
 	}, nil
@@ -971,18 +1047,33 @@ func (s *Service) resultWithCurrentIssues(ctx context.Context, boardID string, p
 	if message == "" {
 		message = "操作失败。"
 	}
-	return ChangeResult{OK: ok, Message: message, BoardID: boardID, ProjectID: projectID, Revision: revision, Issues: issues}, nil
+	return ChangeResult{OK: ok, Message: message, BoardID: boardID, ProjectID: projectID, Revision: revision, Complete: true, Scope: "project", Issues: issues}, nil
 }
 
 func changeError(boardID string, projectID string, revision int64, issues []Issue, message string) ChangeResult {
+	return changeErrorCode(boardID, projectID, revision, issues, "", message)
+}
+
+func changeErrorCode(boardID string, projectID string, revision int64, issues []Issue, code string, message string) ChangeResult {
 	return ChangeResult{
 		OK:        false,
+		Code:      code,
 		Message:   message,
 		BoardID:   boardID,
 		ProjectID: projectID,
 		Revision:  revision,
+		Complete:  true,
+		Scope:     "project",
 		Issues:    SortIssues(issues),
 	}
+}
+
+func revisionConflict(boardID string, projectID string, revision int64, issues []Issue, issue *Issue, baseIssueRevision *int64) *ChangeResult {
+	if issue == nil || baseIssueRevision == nil || *baseIssueRevision <= 0 || *baseIssueRevision == issue.Revision {
+		return nil
+	}
+	result := changeErrorCode(boardID, projectID, revision, issues, "conflict", "任务已被其他端更新，请刷新后重试。")
+	return &result
 }
 
 func projectChangeError(revision int64, projects []Project, projectID string, message string) ProjectChangeResult {
@@ -1209,7 +1300,11 @@ func runStateFromAssistantEvent(event AssistantEvent) *RunState {
 		status = strings.ToLower(strings.TrimSpace(*event.Status))
 	}
 	if event.Type == "run.cancel" ||
+		event.Type == "run.cancelled" ||
+		event.Type == "run.canceled" ||
 		event.Type == "task.cancel" ||
+		event.Type == "task.cancelled" ||
+		event.Type == "task.canceled" ||
 		event.Type == "stopped" ||
 		event.Type == "run.stopped" ||
 		event.Type == "run.interrupt" ||
@@ -1221,8 +1316,14 @@ func runStateFromAssistantEvent(event AssistantEvent) *RunState {
 	}
 	if event.Type == "error" ||
 		event.Type == "run.error" ||
+		event.Type == "run.fail" ||
+		event.Type == "run.failed" ||
+		event.Type == "task.fail" ||
+		event.Type == "task.failed" ||
 		event.Type == "run.expired" ||
 		status == "error" ||
+		status == "failed" ||
+		status == "fail" ||
 		status == "timeout" {
 		state := RunStateFailed
 		return &state
