@@ -208,6 +208,13 @@ type MoveInput struct {
 	BaseIssueRevision *int64  `json:"baseIssueRevision"`
 }
 
+type ClaimInput struct {
+	ID                string `json:"id"`
+	Role              string `json:"role"`
+	UserID            string `json:"userId"`
+	BaseIssueRevision *int64 `json:"baseIssueRevision"`
+}
+
 type AssignAndRunInput struct {
 	ID                     string  `json:"id"`
 	AgentKey               *string `json:"agentKey"`
@@ -298,6 +305,7 @@ type ListResult struct {
 	Teams               []Team               `json:"teams"`
 	TeamMembers         []TeamMember         `json:"teamMembers"`
 	ProjectPermissions  []ProjectPermission  `json:"projectPermissions"`
+	ProjectBindings     []ProjectBinding     `json:"projectBindings"`
 	IssueLabels         []IssueLabel         `json:"issueLabels"`
 	IssueLabelLinks     []IssueLabelLink     `json:"issueLabelLinks"`
 	IssueDependencies   []IssueDependency    `json:"issueDependencies"`
@@ -344,6 +352,44 @@ type ProjectChangeResult struct {
 	Revision  int64     `json:"revision"`
 	Project   *Project  `json:"project,omitempty"`
 	Projects  []Project `json:"projects"`
+}
+
+type ProjectBinding struct {
+	ID                 string     `json:"id"`
+	ProjectID          string     `json:"projectId"`
+	DeviceID           string     `json:"deviceId"`
+	CurrentUserID      string     `json:"currentUserId,omitempty"`
+	LocalProjectID     string     `json:"localProjectId"`
+	LocalDisplayName   string     `json:"localDisplayName"`
+	SyncPolicy         string     `json:"syncPolicy"`
+	ControlMode        string     `json:"controlMode"`
+	Status             string     `json:"status"`
+	LastRemoteRevision int64      `json:"lastRemoteRevision"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
+	DeletedAt          *time.Time `json:"deletedAt,omitempty"`
+	CreatedBy          *string    `json:"createdBy,omitempty"`
+	UpdatedBy          *string    `json:"updatedBy,omitempty"`
+}
+
+type ProjectBindingInput struct {
+	ProjectID          string `json:"projectId"`
+	DeviceID           string `json:"deviceId"`
+	CurrentUserID      string `json:"currentUserId,omitempty"`
+	LocalProjectID     string `json:"localProjectId"`
+	LocalDisplayName   string `json:"localDisplayName,omitempty"`
+	SyncPolicy         string `json:"syncPolicy,omitempty"`
+	ControlMode        string `json:"controlMode,omitempty"`
+	Status             string `json:"status,omitempty"`
+	LastRemoteRevision int64  `json:"lastRemoteRevision,omitempty"`
+}
+
+type ProjectBindingResult struct {
+	OK       bool             `json:"ok"`
+	Message  string           `json:"message"`
+	Revision int64            `json:"revision,omitempty"`
+	Binding  *ProjectBinding  `json:"binding,omitempty"`
+	Bindings []ProjectBinding `json:"bindings,omitempty"`
 }
 
 type AgentOption struct {
