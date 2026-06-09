@@ -6,6 +6,7 @@ const DefaultBoardID = "default"
 const DefaultProjectID = "default"
 const DefaultWorkflowID = "workflow-standard-requirement"
 const DefaultWorkflowKey = "standard_requirement"
+
 type Status string
 
 const (
@@ -191,17 +192,22 @@ type IssueUpdateInput struct {
 	AutomationTimezone *string      `json:"automationTimezone"`
 	AttachmentChatID   *string      `json:"attachmentChatId"`
 	Attachments        []Attachment `json:"attachments"`
+	BaseIssueRevision  *int64       `json:"baseIssueRevision"`
 }
 
 type MoveInput struct {
-	ID       string  `json:"id"`
-	Status   string  `json:"status"`
-	Position float64 `json:"position"`
+	ID                string  `json:"id"`
+	Status            string  `json:"status"`
+	Position          float64 `json:"position"`
+	BaseIssueRevision *int64  `json:"baseIssueRevision"`
 }
 
 type AssignAndRunInput struct {
-	ID       string  `json:"id"`
-	AgentKey *string `json:"agentKey"`
+	ID                     string  `json:"id"`
+	AgentKey               *string `json:"agentKey"`
+	BaseIssueRevision      *int64  `json:"baseIssueRevision"`
+	IdempotencyKey         string  `json:"idempotencyKey"`
+	TargetDesktopSessionID string  `json:"targetDesktopSessionId"`
 }
 
 type AssistantEvent struct {
@@ -271,6 +277,8 @@ type ListResult struct {
 	BoardID             string               `json:"boardId"`
 	ProjectID           string               `json:"projectId"`
 	Revision            int64                `json:"revision"`
+	Complete            bool                 `json:"complete"`
+	Scope               string               `json:"scope"`
 	Projects            []Project            `json:"projects"`
 	Issues              []Issue              `json:"issues"`
 	Users               []UserAccount        `json:"users"`
@@ -308,10 +316,13 @@ type IssuesResult struct {
 
 type ChangeResult struct {
 	OK             bool    `json:"ok"`
+	Code           string  `json:"code,omitempty"`
 	Message        string  `json:"message"`
 	BoardID        string  `json:"boardId"`
 	ProjectID      string  `json:"projectId"`
 	Revision       int64   `json:"revision"`
+	Complete       bool    `json:"complete"`
+	Scope          string  `json:"scope"`
 	Issue          *Issue  `json:"issue,omitempty"`
 	Issues         []Issue `json:"issues"`
 	DeletedIssueID string  `json:"deletedIssueId,omitempty"`

@@ -37,6 +37,13 @@ type Hub struct {
 	sessions        map[string]*Session
 	desktopSessions map[string]*Session
 	pending         map[string]chan Envelope
+	idempotent      map[string]*idempotentRequest
+}
+
+type idempotentRequest struct {
+	done   chan struct{}
+	result any
+	err    error
 }
 
 type desktopAgentLoadResult struct {
@@ -58,6 +65,7 @@ func NewHub(cfg config.Config, service *kanban.Service, store *store.Store, logg
 		sessions:        map[string]*Session{},
 		desktopSessions: map[string]*Session{},
 		pending:         map[string]chan Envelope{},
+		idempotent:      map[string]*idempotentRequest{},
 	}
 }
 
@@ -168,12 +176,13 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		h.respondChange(session, env, result, err, "kanban.issue.updated")
 	case "kanban.issue.delete":
 		var payload struct {
-			ID string `json:"id"`
+			ID                string `json:"id"`
+			BaseIssueRevision *int64 `json:"baseIssueRevision"`
 		}
 		if !decodeOrRespond(session, env, &payload) {
 			return
 		}
-		result, err := h.service.DeleteIssue(context.Background(), env.BoardID, env.ProjectID, payload.ID, session.actorID())
+		result, err := h.service.DeleteIssue(context.Background(), env.BoardID, env.ProjectID, payload.ID, payload.BaseIssueRevision, session.actorID())
 		h.respondChange(session, env, result, err, "kanban.issue.deleted")
 	case "kanban.issue.move":
 		var input kanban.MoveInput
@@ -502,7 +511,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		h.respondMutation(session, env, result, err)
 	case "kanban.workflow.update":
 		var payload struct {
-			ID    string                      `json:"id"`
+			ID    string                     `json:"id"`
 			Input kanban.WorkflowUpdateInput `json:"input"`
 		}
 		if !decodeOrRespond(session, env, &payload) {
@@ -543,6 +552,8 @@ func (h *Hub) applyDesktopSnapshotScope(session *Session, snapshot *kanban.ListR
 	if session.role != "desktop" || session.scope != "current_user" {
 		return
 	}
+	snapshot.Scope = "current_user"
+	snapshot.Complete = false
 	currentUserID := strings.TrimSpace(session.currentUser.ID)
 	if currentUserID == "" {
 		snapshot.Issues = []kanban.Issue{}
@@ -620,6 +631,10 @@ func (h *Hub) respondChange(session *Session, env Envelope, result kanban.Change
 		session.respondError(env, "server_error", err.Error())
 		return
 	}
+	if result.Scope == "" {
+		result.Scope = "project"
+	}
+	result.Complete = true
 	session.respond(env, result)
 	if result.OK {
 		h.broadcastSnapshots(result.BoardID)
@@ -666,37 +681,63 @@ func (h *Hub) assignAndRun(session *Session, env Envelope) {
 		}
 	}
 	if issue == nil {
-		session.respond(env, kanban.ChangeResult{OK: false, Message: "任务不存在。", BoardID: env.BoardID, Revision: snapshot.Revision, Issues: snapshot.Issues})
+		session.respond(env, kanban.ChangeResult{OK: false, Message: "任务不存在。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues})
+		return
+	}
+	if input.BaseIssueRevision != nil && *input.BaseIssueRevision > 0 && *input.BaseIssueRevision != issue.Revision {
+		session.respond(env, kanban.ChangeResult{OK: false, Code: "conflict", Message: "任务已被其他端更新，请刷新后重试。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issue: issue, Issues: kanban.SortIssues(snapshot.Issues)})
+		return
+	}
+	if issue.RunID != nil && strings.TrimSpace(*issue.RunID) != "" {
+		session.respond(env, kanban.ChangeResult{OK: true, Message: "任务已在运行中。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issue: issue, Issues: kanban.SortIssues(snapshot.Issues)})
 		return
 	}
 	agentKey := input.AgentKey
 	if agentKey == nil {
 		agentKey = issue.AssigneeAgentKey
 	}
-	payload := map[string]any{
-		"issue":    issue,
-		"agentKey": agentKey,
-		"message":  buildAssistantPrompt(*issue),
-	}
-	response, err := h.requestDesktop("desktop.assistant.startRun", env.BoardID, env.ProjectID, "", payload)
+	resultPayload, err := h.runIdempotent(input.IdempotencyKey, func() (any, error) {
+		payload := map[string]any{
+			"issue":    issue,
+			"agentKey": agentKey,
+			"message":  buildAssistantPrompt(*issue),
+		}
+		response, err := h.requestDesktop("desktop.assistant.startRun", env.BoardID, env.ProjectID, input.TargetDesktopSessionID, payload)
+		if err != nil {
+			return kanban.ChangeResult{OK: false, Message: err.Error(), BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues}, nil
+		}
+		var result kanban.StartRunResult
+		if err := json.Unmarshal(response.Payload, &result); err != nil {
+			return kanban.ChangeResult{OK: false, Message: "desktop 返回格式无效。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues}, nil
+		}
+		change, err := h.service.StartRun(context.Background(), env.BoardID, env.ProjectID, input.ID, agentKey, result, session.actorID())
+		if err != nil {
+			return nil, err
+		}
+		return change, nil
+	})
 	if err != nil {
-		result := kanban.ChangeResult{OK: false, Message: err.Error(), BoardID: env.BoardID, Revision: snapshot.Revision, Issues: snapshot.Issues}
+		session.respondError(env, "server_error", err.Error())
+		return
+	}
+	result, ok := resultPayload.(kanban.ChangeResult)
+	if !ok {
+		session.respondError(env, "server_error", "启动 task 返回格式无效。")
+		return
+	}
+	if !result.OK {
 		session.respond(env, result)
 		return
 	}
-	var result kanban.StartRunResult
-	if err := json.Unmarshal(response.Payload, &result); err != nil {
-		session.respondError(env, "bad_desktop_response", "desktop 返回格式无效。")
-		return
-	}
-	change, err := h.service.StartRun(context.Background(), env.BoardID, env.ProjectID, input.ID, agentKey, result, session.actorID())
-	h.respondChange(session, env, change, err, "kanban.issue.updated")
+	h.respondChange(session, env, result, nil, "kanban.issue.updated")
 }
 
 func (h *Hub) dispatchToDesktop(session *Session, env Envelope) {
 	var payload struct {
-		ID    string        `json:"id"`
-		Issue *kanban.Issue `json:"issue"`
+		ID                     string        `json:"id"`
+		Issue                  *kanban.Issue `json:"issue"`
+		IdempotencyKey         string        `json:"idempotencyKey"`
+		TargetDesktopSessionID string        `json:"targetDesktopSessionId"`
 	}
 	if !decodeOrRespond(session, env, &payload) {
 		return
@@ -720,29 +761,43 @@ func (h *Hub) dispatchToDesktop(session *Session, env Envelope) {
 			}
 		}
 		if issue == nil {
-			session.respond(env, kanban.ChangeResult{OK: false, Message: "任务不存在。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Issues: snapshot.Issues})
+			session.respond(env, kanban.ChangeResult{OK: false, Message: "任务不存在。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues})
 			return
 		}
 	}
-	response, err := h.requestDesktop("desktop.kanban.issue.dispatch", env.BoardID, env.ProjectID, "", map[string]any{
-		"issue": issue,
+	resultPayload, err := h.runIdempotent(payload.IdempotencyKey, func() (any, error) {
+		response, err := h.requestDesktop("desktop.kanban.issue.dispatch", env.BoardID, env.ProjectID, payload.TargetDesktopSessionID, map[string]any{
+			"issue": issue,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":        true,
+			"message":   "任务已派发到 Desktop。",
+			"issue":     issue,
+			"desktop":   json.RawMessage(response.Payload),
+			"boardId":   env.BoardID,
+			"projectId": env.ProjectID,
+		}, nil
 	})
 	if err != nil {
 		session.respondError(env, "desktop_unavailable", err.Error())
 		return
 	}
-	session.respond(env, map[string]any{
-		"ok":        true,
-		"message":   "任务已派发到 Desktop。",
-		"issue":     issue,
-		"desktop":   json.RawMessage(response.Payload),
-		"boardId":   env.BoardID,
-		"projectId": env.ProjectID,
-	})
+	session.respond(env, resultPayload)
 }
 
 func (h *Hub) forwardDesktop(session *Session, env Envelope, op string) {
-	response, err := h.requestDesktop(op, env.BoardID, env.ProjectID, "", json.RawMessage(env.Payload))
+	targetDesktopSessionID := ""
+	var payload struct {
+		TargetDesktopSessionID string `json:"targetDesktopSessionId"`
+	}
+	if len(env.Payload) > 0 {
+		_ = json.Unmarshal(env.Payload, &payload)
+		targetDesktopSessionID = strings.TrimSpace(payload.TargetDesktopSessionID)
+	}
+	response, err := h.requestDesktop(op, env.BoardID, env.ProjectID, targetDesktopSessionID, json.RawMessage(env.Payload))
 	if err != nil {
 		session.respondError(env, "desktop_unavailable", err.Error())
 		return
@@ -881,6 +936,37 @@ func (h *Hub) completePending(env Envelope) {
 	case ch <- env:
 	default:
 	}
+}
+
+func (h *Hub) runIdempotent(key string, fn func() (any, error)) (any, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fn()
+	}
+
+	h.mu.Lock()
+	if existing := h.idempotent[key]; existing != nil {
+		h.mu.Unlock()
+		<-existing.done
+		return existing.result, existing.err
+	}
+	item := &idempotentRequest{done: make(chan struct{})}
+	h.idempotent[key] = item
+	h.mu.Unlock()
+
+	item.result, item.err = fn()
+	close(item.done)
+
+	go func() {
+		time.Sleep(2 * time.Minute)
+		h.mu.Lock()
+		if h.idempotent[key] == item {
+			delete(h.idempotent, key)
+		}
+		h.mu.Unlock()
+	}()
+
+	return item.result, item.err
 }
 
 func (h *Hub) broadcast(env OutEnvelope) {

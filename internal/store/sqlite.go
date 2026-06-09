@@ -1976,7 +1976,7 @@ func issueSelectSQL(where string) string {
 			i.TITLE_, i.DESCRIPTION_, i.PRIORITY_, COALESCE(i.SEVERITY_, 'medium'), i.POSITION_,
 			i.ASSIGNEE_ID_, i.WORKER_TYPE_, i.WORKER_ID_, i.WORKER_AGENT_, i.REVIEWER_ID_,
 			i.REVIEW_REQUIRED_, i.ACTIVE_REVIEW_ID_, i.ACTIVE_RUN_ID_,
-			ar.CHAT_ID_, ar.RUN_ID_, ar.STATUS_,
+			ar.CHAT_ID_, CASE WHEN ar.STATUS_ = 'running' THEN ar.RUN_ID_ ELSE NULL END, ar.STATUS_,
 			ia.ID_, COALESCE(ia.ENABLED_, 0), ia.CRON_, ia.MESSAGE_, ia.TIMEZONE_,
 			i.CREATED_AT_, i.UPDATED_AT_, i.REVISION_, i.DELETED_AT_,
 			i.CREATED_BY_, i.UPDATED_BY_, i.CREATED_BY_AGENT_, i.UPDATED_BY_AGENT_
@@ -2254,7 +2254,6 @@ func persistRunTx(ctx context.Context, tx *sql.Tx, issue *kanban.Issue, actor st
 		`, status, nowText, nowText, *issue.ActiveRunID); err != nil {
 			return err
 		}
-		issue.ActiveRunID = nil
 	}
 	return nil
 }
