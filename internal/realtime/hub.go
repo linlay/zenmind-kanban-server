@@ -124,6 +124,7 @@ func (h *Hub) unregister(session *Session) {
 	delete(h.sessions, session.id)
 	_, wasDesktop := h.desktopSessions[session.id]
 	delete(h.desktopSessions, session.id)
+	close(session.closed)
 	close(session.send)
 	h.mu.Unlock()
 
@@ -150,10 +151,10 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		env.ProjectID = session.projectID
 	}
 
-	switch env.Op {
-	case "kanban.snapshot.get":
+	switch protocolOp(env.Op) {
+	case "snapshot.get":
 		session.sendSnapshotFor(env)
-	case "kanban.issue.create":
+	case "issue.create":
 		var input kanban.IssueInput
 		if !decodeOrRespond(session, env, &input) {
 			return
@@ -164,7 +165,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.CreateIssue(context.Background(), env.BoardID, input, session.actorID())
 		h.respondChange(session, env, result, err, "kanban.issue.created")
-	case "kanban.issue.update":
+	case "issue.update":
 		var payload struct {
 			ID    string                  `json:"id"`
 			Input kanban.IssueUpdateInput `json:"input"`
@@ -174,7 +175,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.UpdateIssue(context.Background(), env.BoardID, env.ProjectID, payload.ID, payload.Input, session.actorID())
 		h.respondChange(session, env, result, err, "kanban.issue.updated")
-	case "kanban.issue.delete":
+	case "issue.delete":
 		var payload struct {
 			ID                string `json:"id"`
 			BaseIssueRevision *int64 `json:"baseIssueRevision"`
@@ -184,32 +185,39 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.DeleteIssue(context.Background(), env.BoardID, env.ProjectID, payload.ID, payload.BaseIssueRevision, session.actorID())
 		h.respondChange(session, env, result, err, "kanban.issue.deleted")
-	case "kanban.issue.move":
+	case "issue.move":
 		var input kanban.MoveInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.MoveIssue(context.Background(), env.BoardID, env.ProjectID, input, session.actorID())
 		h.respondChange(session, env, result, err, "kanban.issue.updated")
-	case "kanban.issue.transition":
+	case "issue.claim":
+		var input kanban.ClaimInput
+		if !decodeOrRespond(session, env, &input) {
+			return
+		}
+		result, err := h.service.ClaimIssue(context.Background(), env.BoardID, env.ProjectID, input, session.actorID())
+		h.respondChange(session, env, result, err, "kanban.issue.claimed")
+	case "issue.transition":
 		var input kanban.TransitionInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.TransitionIssue(context.Background(), env.BoardID, env.ProjectID, input, session.actorID())
 		h.respondChange(session, env, result, err, "kanban.issue.transitioned")
-	case "kanban.issue.assignAndRun":
+	case "issue.assignRun":
 		h.assignAndRun(session, env)
-	case "kanban.issue.dispatchToDesktop":
+	case "issue.dispatchDesktop":
 		h.dispatchToDesktop(session, env)
-	case "kanban.project.create":
+	case "project.create":
 		var input kanban.ProjectInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.CreateProject(context.Background(), input, session.actorID())
 		h.respondProjectChange(session, env, result, err, "kanban.project.created")
-	case "kanban.project.update":
+	case "project.update":
 		var payload struct {
 			ID    string                    `json:"id"`
 			Input kanban.ProjectUpdateInput `json:"input"`
@@ -219,21 +227,53 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.UpdateProject(context.Background(), payload.ID, payload.Input, session.actorID())
 		h.respondProjectChange(session, env, result, err, "kanban.project.updated")
-	case "kanban.project.move":
+	case "project.move":
 		var input kanban.ProjectMoveInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.MoveProject(context.Background(), input, session.actorID())
 		h.respondProjectChange(session, env, result, err, "kanban.project.moved")
-	case "kanban.user.create":
+	case "projectBinding.list":
+		var payload struct {
+			ProjectID string `json:"projectId"`
+		}
+		if !decodeOrRespond(session, env, &payload) {
+			return
+		}
+		projectID := strings.TrimSpace(payload.ProjectID)
+		if projectID == "" {
+			projectID = env.ProjectID
+		}
+		result, err := h.service.ListProjectBindings(context.Background(), projectID)
+		h.respondProjectBinding(session, env, result, err, false)
+	case "projectBinding.create":
+		var input kanban.ProjectBindingInput
+		if !decodeOrRespond(session, env, &input) {
+			return
+		}
+		if strings.TrimSpace(input.ProjectID) == "" {
+			input.ProjectID = env.ProjectID
+		}
+		result, err := h.service.CreateProjectBinding(context.Background(), input, session.actorID())
+		h.respondProjectBinding(session, env, result, err, true)
+	case "projectBinding.delete":
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if !decodeOrRespond(session, env, &payload) {
+			return
+		}
+		result, err := h.service.DeleteProjectBinding(context.Background(), payload.ID, session.actorID())
+		h.respondProjectBinding(session, env, result, err, true)
+	case "user.create":
 		var input kanban.UserInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.CreateUser(context.Background(), input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.user.update":
+	case "user.update":
 		var payload struct {
 			ID    string                 `json:"id"`
 			Input kanban.UserUpdateInput `json:"input"`
@@ -243,7 +283,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.UpdateUser(context.Background(), payload.ID, payload.Input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.user.delete":
+	case "user.delete":
 		var payload struct {
 			ID string `json:"id"`
 		}
@@ -252,14 +292,14 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.DeleteUser(context.Background(), payload.ID, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.team.create":
+	case "team.create":
 		var input kanban.TeamInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.CreateTeam(context.Background(), input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.team.update":
+	case "team.update":
 		var payload struct {
 			ID    string                 `json:"id"`
 			Input kanban.TeamUpdateInput `json:"input"`
@@ -269,7 +309,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.UpdateTeam(context.Background(), payload.ID, payload.Input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.team.delete":
+	case "team.delete":
 		var payload struct {
 			ID string `json:"id"`
 		}
@@ -278,14 +318,14 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.DeleteTeam(context.Background(), payload.ID, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.teamMember.add":
+	case "team.member.add":
 		var input kanban.TeamMemberInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.AddTeamMember(context.Background(), input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.teamMember.update":
+	case "team.member.update":
 		var payload struct {
 			TeamID string                       `json:"teamId"`
 			UserID string                       `json:"userId"`
@@ -296,7 +336,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.UpdateTeamMember(context.Background(), payload.TeamID, payload.UserID, payload.Input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.teamMember.remove":
+	case "team.member.remove":
 		var payload struct {
 			TeamID string `json:"teamId"`
 			UserID string `json:"userId"`
@@ -306,14 +346,14 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.RemoveTeamMember(context.Background(), payload.TeamID, payload.UserID, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.agent.create":
+	case "agent.create":
 		var input kanban.AgentInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.CreateAgent(context.Background(), input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.agent.update":
+	case "agent.update":
 		var payload struct {
 			ID    string                  `json:"id"`
 			Input kanban.AgentUpdateInput `json:"input"`
@@ -323,7 +363,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.UpdateAgent(context.Background(), payload.ID, payload.Input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.agent.delete":
+	case "agent.delete":
 		var payload struct {
 			ID string `json:"id"`
 		}
@@ -332,14 +372,14 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.DeleteAgent(context.Background(), payload.ID, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.projectPermission.grant":
+	case "project.permission.grant":
 		var input kanban.ProjectPermissionInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.GrantProjectPermission(context.Background(), input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.projectPermission.update":
+	case "project.permission.update":
 		var payload struct {
 			ID    string                              `json:"id"`
 			Input kanban.ProjectPermissionUpdateInput `json:"input"`
@@ -349,7 +389,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.UpdateProjectPermission(context.Background(), payload.ID, payload.Input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.projectPermission.revoke":
+	case "project.permission.revoke":
 		var payload struct {
 			ID string `json:"id"`
 		}
@@ -358,14 +398,14 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.RevokeProjectPermission(context.Background(), payload.ID, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.issueLabel.create":
+	case "issueLabel.create":
 		var input kanban.IssueLabelInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.CreateIssueLabel(context.Background(), input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.issueLabel.update":
+	case "issueLabel.update":
 		var payload struct {
 			ID    string                       `json:"id"`
 			Input kanban.IssueLabelUpdateInput `json:"input"`
@@ -375,7 +415,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.UpdateIssueLabel(context.Background(), payload.ID, payload.Input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.issueLabel.delete":
+	case "issueLabel.delete":
 		var payload struct {
 			ID string `json:"id"`
 		}
@@ -384,21 +424,21 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.DeleteIssueLabel(context.Background(), payload.ID, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.issue.labels.set":
+	case "issue.label.set":
 		var input kanban.IssueLabelsSetInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.SetIssueLabels(context.Background(), input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.issueDependency.create":
+	case "issue.dependency.create":
 		var input kanban.IssueDependencyInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.CreateIssueDependency(context.Background(), input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.issueDependency.delete":
+	case "issue.dependency.delete":
 		var payload struct {
 			ID string `json:"id"`
 		}
@@ -407,14 +447,14 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.DeleteIssueDependency(context.Background(), payload.ID, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.review.create":
+	case "review.create":
 		var input kanban.ReviewInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.CreateReview(context.Background(), input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.review.update":
+	case "review.update":
 		var payload struct {
 			ID    string                   `json:"id"`
 			Input kanban.ReviewUpdateInput `json:"input"`
@@ -424,7 +464,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.UpdateReview(context.Background(), payload.ID, payload.Input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.review.delete":
+	case "review.delete":
 		var payload struct {
 			ID string `json:"id"`
 		}
@@ -433,14 +473,14 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.DeleteReview(context.Background(), payload.ID, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.reviewComment.create":
+	case "review.comment.create":
 		var input kanban.ReviewCommentInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.CreateReviewComment(context.Background(), input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.reviewComment.update":
+	case "review.comment.update":
 		var payload struct {
 			ID    string                          `json:"id"`
 			Input kanban.ReviewCommentUpdateInput `json:"input"`
@@ -450,7 +490,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.UpdateReviewComment(context.Background(), payload.ID, payload.Input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.reviewComment.delete":
+	case "review.comment.delete":
 		var payload struct {
 			ID string `json:"id"`
 		}
@@ -459,7 +499,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.DeleteReviewComment(context.Background(), payload.ID, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.activity.list":
+	case "activity.list":
 		var payload struct {
 			Limit int `json:"limit"`
 		}
@@ -472,7 +512,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 			return
 		}
 		session.respond(env, map[string]any{"ok": true, "items": items})
-	case "kanban.agentRun.list":
+	case "agentRun.list":
 		var payload struct {
 			IssueID string `json:"issueId"`
 		}
@@ -485,7 +525,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 			return
 		}
 		session.respond(env, map[string]any{"ok": true, "items": items})
-	case "kanban.agentToolCall.list":
+	case "agentToolCall.list":
 		var payload struct {
 			AgentRunID string `json:"agentRunId"`
 		}
@@ -500,16 +540,24 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		session.respond(env, map[string]any{"ok": true, "items": items})
 	case "desktop.online.list":
 		h.desktopOnlineList(session, env)
-	case "desktop.assistant.listAgents":
+	case "agent.listDesktop":
 		h.forwardDesktop(session, env, "desktop.assistant.listAgents")
-	case "kanban.workflow.create":
+	case "desktop.project.listLocal":
+		h.forwardDesktop(session, env, "desktop.project.listLocal")
+	case "desktop.project.createLocal":
+		h.forwardDesktop(session, env, "desktop.project.createLocal")
+	case "desktop.project.bind":
+		h.forwardDesktop(session, env, "desktop.project.bind")
+	case "desktop.project.unbind":
+		h.forwardDesktop(session, env, "desktop.project.unbind")
+	case "workflow.create":
 		var input kanban.WorkflowInput
 		if !decodeOrRespond(session, env, &input) {
 			return
 		}
 		result, err := h.service.CreateWorkflow(context.Background(), input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.workflow.update":
+	case "workflow.update":
 		var payload struct {
 			ID    string                     `json:"id"`
 			Input kanban.WorkflowUpdateInput `json:"input"`
@@ -519,7 +567,7 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.UpdateWorkflow(context.Background(), payload.ID, payload.Input, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.workflow.delete":
+	case "workflow.delete":
 		var payload struct {
 			ID string `json:"id"`
 		}
@@ -528,9 +576,9 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.DeleteWorkflow(context.Background(), payload.ID, session.actorID())
 		h.respondMutation(session, env, result, err)
-	case "kanban.automation.sync":
+	case "automation.sync":
 		h.forwardDesktop(session, env, "desktop.automation.sync")
-	case "desktop.hello":
+	case "session.hello":
 		h.desktopHello(session, env)
 	case "desktop.assistant.event":
 		h.desktopAssistantEvent(session, env)
@@ -654,6 +702,17 @@ func (h *Hub) respondProjectChange(session *Session, env Envelope, result kanban
 	}
 }
 
+func (h *Hub) respondProjectBinding(session *Session, env Envelope, result kanban.ProjectBindingResult, err error, broadcast bool) {
+	if err != nil {
+		session.respondError(env, "server_error", err.Error())
+		return
+	}
+	session.respond(env, result)
+	if broadcast && result.OK {
+		h.broadcastSnapshots(env.BoardID)
+	}
+}
+
 func (h *Hub) respondMutation(session *Session, env Envelope, result kanban.MutationResult, err error) {
 	if err != nil {
 		session.respondError(env, "server_error", err.Error())
@@ -662,6 +721,123 @@ func (h *Hub) respondMutation(session *Session, env Envelope, result kanban.Muta
 	session.respond(env, result)
 	if result.OK {
 		h.broadcastSnapshots(result.BoardID)
+	}
+}
+
+func protocolOp(op string) string {
+	switch op {
+	case "kanban.snapshot.get":
+		return "snapshot.get"
+	case "kanban.issue.create":
+		return "issue.create"
+	case "kanban.issue.update":
+		return "issue.update"
+	case "kanban.issue.delete":
+		return "issue.delete"
+	case "kanban.issue.move":
+		return "issue.move"
+	case "kanban.issue.claim":
+		return "issue.claim"
+	case "kanban.issue.transition":
+		return "issue.transition"
+	case "kanban.issue.assignAndRun":
+		return "issue.assignRun"
+	case "kanban.issue.dispatchToDesktop":
+		return "issue.dispatchDesktop"
+	case "kanban.project.create":
+		return "project.create"
+	case "kanban.project.update":
+		return "project.update"
+	case "kanban.project.move":
+		return "project.move"
+	case "kanban.projectBinding.list":
+		return "projectBinding.list"
+	case "kanban.projectBinding.create":
+		return "projectBinding.create"
+	case "kanban.projectBinding.delete":
+		return "projectBinding.delete"
+	case "kanban.desktop.project.listLocal":
+		return "desktop.project.listLocal"
+	case "kanban.desktop.project.createLocal":
+		return "desktop.project.createLocal"
+	case "kanban.desktop.project.bind":
+		return "desktop.project.bind"
+	case "kanban.desktop.project.unbind":
+		return "desktop.project.unbind"
+	case "kanban.projectPermission.grant":
+		return "project.permission.grant"
+	case "kanban.projectPermission.update":
+		return "project.permission.update"
+	case "kanban.projectPermission.revoke":
+		return "project.permission.revoke"
+	case "kanban.user.create":
+		return "user.create"
+	case "kanban.user.update":
+		return "user.update"
+	case "kanban.user.delete":
+		return "user.delete"
+	case "kanban.team.create":
+		return "team.create"
+	case "kanban.team.update":
+		return "team.update"
+	case "kanban.team.delete":
+		return "team.delete"
+	case "kanban.teamMember.add":
+		return "team.member.add"
+	case "kanban.teamMember.update":
+		return "team.member.update"
+	case "kanban.teamMember.remove":
+		return "team.member.remove"
+	case "kanban.agent.create":
+		return "agent.create"
+	case "kanban.agent.update":
+		return "agent.update"
+	case "kanban.agent.delete":
+		return "agent.delete"
+	case "kanban.issueLabel.create":
+		return "issueLabel.create"
+	case "kanban.issueLabel.update":
+		return "issueLabel.update"
+	case "kanban.issueLabel.delete":
+		return "issueLabel.delete"
+	case "kanban.issue.labels.set":
+		return "issue.label.set"
+	case "kanban.issueDependency.create":
+		return "issue.dependency.create"
+	case "kanban.issueDependency.delete":
+		return "issue.dependency.delete"
+	case "kanban.review.create":
+		return "review.create"
+	case "kanban.review.update":
+		return "review.update"
+	case "kanban.review.delete":
+		return "review.delete"
+	case "kanban.reviewComment.create":
+		return "review.comment.create"
+	case "kanban.reviewComment.update":
+		return "review.comment.update"
+	case "kanban.reviewComment.delete":
+		return "review.comment.delete"
+	case "kanban.activity.list":
+		return "activity.list"
+	case "kanban.agentRun.list":
+		return "agentRun.list"
+	case "kanban.agentToolCall.list":
+		return "agentToolCall.list"
+	case "desktop.assistant.listAgents":
+		return "agent.listDesktop"
+	case "kanban.workflow.create":
+		return "workflow.create"
+	case "kanban.workflow.update":
+		return "workflow.update"
+	case "kanban.workflow.delete":
+		return "workflow.delete"
+	case "kanban.automation.sync":
+		return "automation.sync"
+	case "desktop.hello":
+		return "session.hello"
+	default:
+		return op
 	}
 }
 
@@ -804,7 +980,7 @@ func (h *Hub) forwardDesktop(session *Session, env Envelope, op string) {
 		session.respondError(env, "desktop_unavailable", err.Error())
 		return
 	}
-	session.send <- OutEnvelope{
+	session.enqueue(OutEnvelope{
 		V:         ProtocolVersion,
 		Type:      "rpc.res",
 		ID:        env.ID,
@@ -815,7 +991,7 @@ func (h *Hub) forwardDesktop(session *Session, env Envelope, op string) {
 		OK:        response.OK,
 		Error:     response.Error,
 		Payload:   json.RawMessage(response.Payload),
-	}
+	})
 }
 
 func (h *Hub) desktopHello(session *Session, env Envelope) {
@@ -903,7 +1079,7 @@ func (h *Hub) requestDesktop(op string, boardID string, projectID string, target
 		delete(h.pending, id)
 		h.mu.Unlock()
 	}()
-	desktop.send <- OutEnvelope{
+	if !desktop.enqueue(OutEnvelope{
 		V:         ProtocolVersion,
 		Type:      "rpc.req",
 		ID:        id,
@@ -912,6 +1088,8 @@ func (h *Hub) requestDesktop(op string, boardID string, projectID string, target
 		BoardID:   boardID,
 		ProjectID: projectID,
 		Payload:   payload,
+	}) {
+		return Envelope{}, errors.New("desktop 连接已断开。")
 	}
 	select {
 	case response := <-ch:
@@ -979,11 +1157,7 @@ func (h *Hub) broadcast(env OutEnvelope) {
 	}
 	h.mu.RUnlock()
 	for _, session := range sessions {
-		select {
-		case session.send <- env:
-		default:
-			h.unregister(session)
-		}
+		session.enqueue(env)
 	}
 }
 
@@ -1001,8 +1175,7 @@ func (h *Hub) broadcastSnapshots(boardID string) {
 			continue
 		}
 		session.projectID = snapshot.ProjectID
-		select {
-		case session.send <- OutEnvelope{
+		session.enqueue(OutEnvelope{
 			V:         ProtocolVersion,
 			Type:      "event",
 			Op:        "kanban.snapshot",
@@ -1012,10 +1185,7 @@ func (h *Hub) broadcastSnapshots(boardID string) {
 			Revision:  snapshot.Revision,
 			OK:        boolPtr(true),
 			Payload:   snapshot,
-		}:
-		default:
-			h.unregister(session)
-		}
+		})
 	}
 }
 
@@ -1180,7 +1350,10 @@ func (h *Hub) checkOrigin(r *http.Request) bool {
 	if len(h.cfg.AllowedOrigins) == 0 {
 		return true
 	}
-	origin := r.Header.Get("Origin")
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return strings.TrimSpace(r.URL.Query().Get("role")) == "desktop"
+	}
 	for _, allowed := range h.cfg.AllowedOrigins {
 		if allowed == "*" || allowed == origin {
 			return true

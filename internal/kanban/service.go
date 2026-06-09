@@ -15,6 +15,7 @@ type Repository interface {
 	Path() string
 	ListWorkflowCatalog(ctx context.Context) (WorkflowCatalog, error)
 	ListProjects(ctx context.Context) ([]Project, error)
+	ListProjectBindings(ctx context.Context, projectID string) ([]ProjectBinding, error)
 	ListIssues(ctx context.Context, boardID string, projectID string) ([]Issue, int64, error)
 	ListProjectIssueStats(ctx context.Context, boardID string) ([]ProjectIssueStat, error)
 	ListUsers(ctx context.Context) ([]UserAccount, error)
@@ -41,6 +42,8 @@ type Repository interface {
 	CreateProject(ctx context.Context, project Project, actor string) (int64, error)
 	UpdateProject(ctx context.Context, projectID string, input ProjectUpdateInput, actor string) (int64, error)
 	MoveProject(ctx context.Context, input ProjectMoveInput, actor string) (int64, error)
+	UpsertProjectBinding(ctx context.Context, binding ProjectBinding, actor string) (ProjectBinding, int64, error)
+	DeleteProjectBinding(ctx context.Context, id string, actor string) (int64, error)
 	CreateUser(ctx context.Context, input UserInput, actor string) (int64, error)
 	UpdateUser(ctx context.Context, id string, input UserUpdateInput, actor string) (int64, error)
 	DeleteUser(ctx context.Context, id string, actor string) (int64, error)
@@ -190,6 +193,10 @@ func (s *Service) Snapshot(ctx context.Context, boardID string, projectID string
 	if err != nil {
 		return ListResult{}, err
 	}
+	projectBindings, err := s.repo.ListProjectBindings(ctx, "")
+	if err != nil {
+		return ListResult{}, err
+	}
 	projectIDs := snapshotProjectIDs(projects, projectID)
 	issueIDs := snapshotIssueIDs(issues)
 	issueLabels, err := s.repo.ListIssueLabelsForProjects(ctx, projectIDs)
@@ -245,6 +252,7 @@ func (s *Service) Snapshot(ctx context.Context, boardID string, projectID string
 		Teams:               catalog.Teams,
 		TeamMembers:         teamMembers,
 		ProjectPermissions:  catalog.ProjectPermissions,
+		ProjectBindings:     projectBindings,
 		IssueLabels:         issueLabels,
 		IssueLabelLinks:     issueLabelLinks,
 		IssueDependencies:   issueDependencies,
@@ -528,6 +536,75 @@ func (s *Service) MoveIssue(ctx context.Context, boardID string, projectID strin
 		Issue:     findIssue(issues, input.ID),
 		Issues:    issues,
 	})
+}
+
+func (s *Service) ClaimIssue(ctx context.Context, boardID string, projectID string, input ClaimInput, actor string) (ChangeResult, error) {
+	boardID = normalizeBoardID(boardID)
+	projectID = normalizeProjectID(projectID)
+	current, revision, err := s.repo.ListIssues(ctx, boardID, projectID)
+	if err != nil {
+		return ChangeResult{}, err
+	}
+	issue := findIssue(current, input.ID)
+	if issue == nil {
+		return changeError(boardID, projectID, revision, current, "issue 不存在。"), nil
+	}
+	if conflict := revisionConflict(boardID, projectID, revision, current, issue, input.BaseIssueRevision); conflict != nil {
+		return *conflict, nil
+	}
+	userID := strings.TrimSpace(input.UserID)
+	if userID == "" {
+		userID = strings.TrimSpace(actor)
+	}
+	if userID == "" {
+		return changeError(boardID, projectID, revision, current, "认领用户不能为空。"), nil
+	}
+	role := strings.TrimSpace(input.Role)
+	if role == "" {
+		role = "assignee"
+	}
+	next := *issue
+	next.UpdatedAt = time.Now().UTC()
+	next.UpdatedBy = actorPtr(actor)
+	switch role {
+	case "assignee":
+		workerType := "human"
+		next.AssigneeID = &userID
+		next.WorkerType = &workerType
+		next.WorkerID = &userID
+		next.WorkerAgent = nil
+		next.AssigneeAgentKey = nil
+	case "worker":
+		workerType := "human"
+		next.WorkerType = &workerType
+		next.WorkerID = &userID
+		next.WorkerAgent = nil
+		next.AssigneeAgentKey = nil
+	case "reviewer":
+		next.ReviewerID = &userID
+		next.ReviewRequired = true
+	default:
+		return changeError(boardID, projectID, revision, current, "认领角色无效。"), nil
+	}
+	nextRevision, err := s.repo.ReplaceIssue(ctx, boardID, next, "kanban.issue.claimed", actor)
+	if err != nil {
+		return ChangeResult{}, err
+	}
+	issues, _, err := s.repo.ListIssues(ctx, boardID, projectID)
+	if err != nil {
+		return ChangeResult{}, err
+	}
+	return ChangeResult{
+		OK:        true,
+		Message:   "issue 已认领。",
+		BoardID:   boardID,
+		ProjectID: projectID,
+		Revision:  nextRevision,
+		Complete:  true,
+		Scope:     "project",
+		Issue:     findIssue(issues, input.ID),
+		Issues:    issues,
+	}, nil
 }
 
 func (s *Service) DeleteIssue(ctx context.Context, boardID string, projectID string, issueID string, baseIssueRevision *int64, actor string) (ChangeResult, error) {
@@ -1043,6 +1120,76 @@ func (s *Service) MoveProject(ctx context.Context, input ProjectMoveInput, actor
 	}, nil
 }
 
+func (s *Service) ListProjectBindings(ctx context.Context, projectID string) (ProjectBindingResult, error) {
+	bindings, err := s.repo.ListProjectBindings(ctx, strings.TrimSpace(projectID))
+	if err != nil {
+		return ProjectBindingResult{}, err
+	}
+	return ProjectBindingResult{
+		OK:       true,
+		Message:  "项目本地联动已加载。",
+		Bindings: bindings,
+	}, nil
+}
+
+func (s *Service) CreateProjectBinding(ctx context.Context, input ProjectBindingInput, actor string) (ProjectBindingResult, error) {
+	projectID := normalizeProjectID(input.ProjectID)
+	projects, err := s.repo.ListProjects(ctx)
+	if err != nil {
+		return ProjectBindingResult{}, err
+	}
+	if !projectExists(projects, projectID) {
+		return projectBindingError("项目不存在。"), nil
+	}
+	deviceID := strings.TrimSpace(input.DeviceID)
+	if deviceID == "" {
+		return projectBindingError("请选择在线 Desktop 设备。"), nil
+	}
+	localProjectID := strings.TrimSpace(input.LocalProjectID)
+	if localProjectID == "" {
+		return projectBindingError("请选择本地项目。"), nil
+	}
+	binding := ProjectBinding{
+		ID:                 createProjectBindingID(),
+		ProjectID:          projectID,
+		DeviceID:           deviceID,
+		CurrentUserID:      strings.TrimSpace(input.CurrentUserID),
+		LocalProjectID:     localProjectID,
+		LocalDisplayName:   sanitizeLocalProjectDisplayName(input.LocalDisplayName, localProjectID),
+		SyncPolicy:         normalizeProjectBindingSyncPolicy(input.SyncPolicy),
+		ControlMode:        normalizeProjectBindingControlMode(input.ControlMode),
+		Status:             normalizeProjectBindingStatus(input.Status),
+		LastRemoteRevision: input.LastRemoteRevision,
+	}
+	if binding.LastRemoteRevision < 0 {
+		binding.LastRemoteRevision = 0
+	}
+	stored, revision, err := s.repo.UpsertProjectBinding(ctx, binding, actor)
+	if err != nil {
+		return ProjectBindingResult{}, err
+	}
+	return ProjectBindingResult{
+		OK:       true,
+		Message:  "项目本地联动已保存。",
+		Revision: revision,
+		Binding:  &stored,
+		Bindings: []ProjectBinding{stored},
+	}, nil
+}
+
+func (s *Service) DeleteProjectBinding(ctx context.Context, id string, actor string) (ProjectBindingResult, error) {
+	revision, err := s.repo.DeleteProjectBinding(ctx, strings.TrimSpace(id), actor)
+	if err != nil {
+		return ProjectBindingResult{}, err
+	}
+	_ = revision
+	return ProjectBindingResult{
+		OK:       true,
+		Message:  "项目本地联动已解除。",
+		Revision: revision,
+	}, nil
+}
+
 func (s *Service) resultWithCurrentIssues(ctx context.Context, boardID string, projectID string, ok bool, message string) (ChangeResult, error) {
 	boardID = normalizeBoardID(boardID)
 	projectID = normalizeProjectID(projectID)
@@ -1099,6 +1246,59 @@ func projectChangeError(revision int64, projects []Project, projectID string, me
 		ProjectID: projectID,
 		Revision:  revision,
 		Projects:  projects,
+	}
+}
+
+func projectBindingError(message string) ProjectBindingResult {
+	return ProjectBindingResult{
+		OK:      false,
+		Message: message,
+	}
+}
+
+func sanitizeLocalProjectDisplayName(value string, fallback string) string {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		text = strings.TrimSpace(fallback)
+	}
+	text = strings.ReplaceAll(text, "\\", "/")
+	for strings.Contains(text, "//") {
+		text = strings.ReplaceAll(text, "//", "/")
+	}
+	text = strings.Trim(text, "/")
+	if idx := strings.LastIndex(text, "/"); idx >= 0 {
+		text = strings.TrimSpace(text[idx+1:])
+	}
+	if text == "" {
+		return "本地项目"
+	}
+	return text
+}
+
+func normalizeProjectBindingSyncPolicy(value string) string {
+	switch strings.TrimSpace(value) {
+	case "select", "all":
+		return strings.TrimSpace(value)
+	default:
+		return "future"
+	}
+}
+
+func normalizeProjectBindingControlMode(value string) string {
+	switch strings.TrimSpace(value) {
+	case "observe", "disabled":
+		return strings.TrimSpace(value)
+	default:
+		return "dispatch"
+	}
+}
+
+func normalizeProjectBindingStatus(value string) string {
+	switch strings.TrimSpace(value) {
+	case "paused", "error":
+		return strings.TrimSpace(value)
+	default:
+		return "active"
 	}
 }
 
@@ -1303,6 +1503,10 @@ func createProjectID() string {
 		return strings.ToUpper(hex.EncodeToString([]byte(time.Now().Format("150405.000000000"))))
 	}
 	return strings.ToUpper(strings.TrimLeft(time.Now().UTC().Format("20060102150405"), "0") + hex.EncodeToString(random[:]))
+}
+
+func createProjectBindingID() string {
+	return "pbind-" + strings.ToLower(createProjectID())
 }
 
 func runStateFromAssistantEvent(event AssistantEvent) *RunState {

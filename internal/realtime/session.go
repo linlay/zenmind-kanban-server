@@ -105,6 +105,22 @@ func (s *Session) sendSnapshot() {
 	s.sendSnapshotFor(env)
 }
 
+func (s *Session) enqueue(env OutEnvelope) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+			s.hub.unregister(s)
+		}
+	}()
+	select {
+	case s.send <- env:
+		return true
+	default:
+		s.hub.unregister(s)
+		return false
+	}
+}
+
 func (s *Session) sendSnapshotFor(env Envelope) {
 	projectID := env.ProjectID
 	var payload struct {
@@ -123,10 +139,10 @@ func (s *Session) sendSnapshotFor(env Envelope) {
 	}
 	s.projectID = snapshot.ProjectID
 	outType := "event"
-	if env.Op == "kanban.snapshot.get" {
+	if protocolOp(env.Op) == "snapshot.get" {
 		outType = "rpc.res"
 	}
-	s.send <- OutEnvelope{
+	s.enqueue(OutEnvelope{
 		V:         ProtocolVersion,
 		Type:      outType,
 		ID:        env.ID,
@@ -137,11 +153,11 @@ func (s *Session) sendSnapshotFor(env Envelope) {
 		Revision:  snapshot.Revision,
 		OK:        boolPtr(true),
 		Payload:   snapshot,
-	}
+	})
 }
 
 func (s *Session) respond(env Envelope, payload any) {
-	s.send <- OutEnvelope{
+	s.enqueue(OutEnvelope{
 		V:         ProtocolVersion,
 		Type:      "rpc.res",
 		ID:        env.ID,
@@ -151,7 +167,7 @@ func (s *Session) respond(env Envelope, payload any) {
 		ProjectID: env.ProjectID,
 		OK:        boolPtr(true),
 		Payload:   payload,
-	}
+	})
 }
 
 func (s *Session) respondError(env Envelope, code string, message string) {
@@ -162,7 +178,7 @@ func (s *Session) respondError(env Envelope, code string, message string) {
 		"ok":      false,
 		"message": message,
 	})
-	s.send <- OutEnvelope{
+	s.enqueue(OutEnvelope{
 		V:         ProtocolVersion,
 		Type:      "rpc.res",
 		ID:        env.ID,
@@ -173,5 +189,5 @@ func (s *Session) respondError(env Envelope, code string, message string) {
 		OK:        boolPtr(false),
 		Error:     &ErrorPayload{Code: code, Message: message},
 		Payload:   json.RawMessage(payload),
-	}
+	})
 }
