@@ -124,6 +124,7 @@ func (h *Hub) unregister(session *Session) {
 	delete(h.sessions, session.id)
 	_, wasDesktop := h.desktopSessions[session.id]
 	delete(h.desktopSessions, session.id)
+	close(session.closed)
 	close(session.send)
 	h.mu.Unlock()
 
@@ -979,7 +980,7 @@ func (h *Hub) forwardDesktop(session *Session, env Envelope, op string) {
 		session.respondError(env, "desktop_unavailable", err.Error())
 		return
 	}
-	session.send <- OutEnvelope{
+	session.enqueue(OutEnvelope{
 		V:         ProtocolVersion,
 		Type:      "rpc.res",
 		ID:        env.ID,
@@ -990,7 +991,7 @@ func (h *Hub) forwardDesktop(session *Session, env Envelope, op string) {
 		OK:        response.OK,
 		Error:     response.Error,
 		Payload:   json.RawMessage(response.Payload),
-	}
+	})
 }
 
 func (h *Hub) desktopHello(session *Session, env Envelope) {
@@ -1078,7 +1079,7 @@ func (h *Hub) requestDesktop(op string, boardID string, projectID string, target
 		delete(h.pending, id)
 		h.mu.Unlock()
 	}()
-	desktop.send <- OutEnvelope{
+	if !desktop.enqueue(OutEnvelope{
 		V:         ProtocolVersion,
 		Type:      "rpc.req",
 		ID:        id,
@@ -1087,6 +1088,8 @@ func (h *Hub) requestDesktop(op string, boardID string, projectID string, target
 		BoardID:   boardID,
 		ProjectID: projectID,
 		Payload:   payload,
+	}) {
+		return Envelope{}, errors.New("desktop 连接已断开。")
 	}
 	select {
 	case response := <-ch:
@@ -1154,11 +1157,7 @@ func (h *Hub) broadcast(env OutEnvelope) {
 	}
 	h.mu.RUnlock()
 	for _, session := range sessions {
-		select {
-		case session.send <- env:
-		default:
-			h.unregister(session)
-		}
+		session.enqueue(env)
 	}
 }
 
@@ -1176,8 +1175,7 @@ func (h *Hub) broadcastSnapshots(boardID string) {
 			continue
 		}
 		session.projectID = snapshot.ProjectID
-		select {
-		case session.send <- OutEnvelope{
+		session.enqueue(OutEnvelope{
 			V:         ProtocolVersion,
 			Type:      "event",
 			Op:        "kanban.snapshot",
@@ -1187,10 +1185,7 @@ func (h *Hub) broadcastSnapshots(boardID string) {
 			Revision:  snapshot.Revision,
 			OK:        boolPtr(true),
 			Payload:   snapshot,
-		}:
-		default:
-			h.unregister(session)
-		}
+		})
 	}
 }
 
