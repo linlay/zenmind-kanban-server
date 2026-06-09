@@ -180,13 +180,30 @@ func TestServiceSeedsWorkflowCatalog(t *testing.T) {
 			t.Fatalf("expected workflow %s/%s in %#v", key, name, snapshot.Workflows)
 		}
 	}
-	statusCounts := map[string]int{}
+	statusColumns := map[string]map[string]bool{}
+	statusKeys := map[string]map[string]bool{}
 	for _, status := range snapshot.WorkflowStatuses {
-		statusCounts[status.WorkflowID]++
+		if statusColumns[status.WorkflowID] == nil {
+			statusColumns[status.WorkflowID] = map[string]bool{}
+		}
+		if statusKeys[status.WorkflowID] == nil {
+			statusKeys[status.WorkflowID] = map[string]bool{}
+		}
+		statusColumns[status.WorkflowID][status.ColumnKey] = true
+		statusKeys[status.WorkflowID][status.Key] = true
 	}
+	expectedColumns := []string{"backlog", "todo", "in_progress", "in_review", "completed"}
 	for _, workflow := range snapshot.Workflows {
-		if statusCounts[workflow.ID] != 5 {
-			t.Fatalf("expected workflow %s to have 5 statuses, got %d", workflow.Key, statusCounts[workflow.ID])
+		for _, column := range expectedColumns {
+			if !statusColumns[workflow.ID][column] {
+				t.Fatalf("expected workflow %s to include column status %s", workflow.Key, column)
+			}
+		}
+	}
+	expectedStandardDetails := []string{"waiting_answer", "waiting_submit", "waiting_approval", "testing_in_progress", "deployment_failed", "success", "failed", "interrupted"}
+	for _, key := range expectedStandardDetails {
+		if !statusKeys[kanban.DefaultWorkflowID][key] {
+			t.Fatalf("expected standard requirement workflow to include detail status %s", key)
 		}
 	}
 	if !transitionExists(snapshot.WorkflowTransitions, "workflow-standard-requirement", "agent_done") {

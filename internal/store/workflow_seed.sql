@@ -14,6 +14,27 @@ ON CONFLICT(ID_) DO UPDATE SET KEY_=excluded.KEY_, NAME_=excluded.NAME_, COLUMN_
 INSERT INTO workflow_status_def (ID_, KEY_, NAME_, COLUMN_KEY_, DESCRIPTION_, IS_SYSTEM_, CREATED_AT_, UPDATED_AT_)
 VALUES ('status-def-completed', 'completed', '已完成', 'completed', '', 1, '__NOW__', '__NOW__')
 ON CONFLICT(ID_) DO UPDATE SET KEY_=excluded.KEY_, NAME_=excluded.NAME_, COLUMN_KEY_=excluded.COLUMN_KEY_, UPDATED_AT_=excluded.UPDATED_AT_;
+INSERT INTO workflow_status_def (ID_, KEY_, NAME_, COLUMN_KEY_, DESCRIPTION_, IS_SYSTEM_, CREATED_AT_, UPDATED_AT_)
+VALUES
+	('status-def-waiting_answer', 'waiting_answer', '等待回答', 'in_review', '等待人工回答或补充信息。', 1, '__NOW__', '__NOW__'),
+	('status-def-waiting_submit', 'waiting_submit', '等待提交', 'in_review', '等待人工提交交付物或结论。', 1, '__NOW__', '__NOW__'),
+	('status-def-waiting_approval', 'waiting_approval', '等待批准', 'in_review', '等待人工审批通过。', 1, '__NOW__', '__NOW__'),
+	('status-def-success', 'success', '成功', 'completed', '任务以成功结果结束。', 1, '__NOW__', '__NOW__'),
+	('status-def-failed', 'failed', '失败', 'completed', '任务以失败结果结束。', 1, '__NOW__', '__NOW__'),
+	('status-def-interrupted', 'interrupted', '中断', 'completed', '任务被中断或提前终止。', 1, '__NOW__', '__NOW__'),
+	('status-def-testing_waiting_submit', 'testing_waiting_submit', '测试等待提交', 'in_review', '测试阶段等待提交测试结果。', 1, '__NOW__', '__NOW__'),
+	('status-def-testing_in_progress', 'testing_in_progress', '测试中', 'in_progress', '测试阶段正在执行。', 1, '__NOW__', '__NOW__'),
+	('status-def-testing_waiting_approval', 'testing_waiting_approval', '测试等待批准', 'in_review', '测试阶段等待验收批准。', 1, '__NOW__', '__NOW__'),
+	('status-def-testing_success', 'testing_success', '测试成功', 'completed', '测试阶段成功结束。', 1, '__NOW__', '__NOW__'),
+	('status-def-testing_failed', 'testing_failed', '测试失败', 'completed', '测试阶段失败结束。', 1, '__NOW__', '__NOW__'),
+	('status-def-testing_interrupted', 'testing_interrupted', '测试中断', 'completed', '测试阶段被中断。', 1, '__NOW__', '__NOW__'),
+	('status-def-deployment_waiting_submit', 'deployment_waiting_submit', '部署等待提交', 'in_review', '部署阶段等待提交发布申请。', 1, '__NOW__', '__NOW__'),
+	('status-def-deployment_in_progress', 'deployment_in_progress', '部署中', 'in_progress', '部署阶段正在执行。', 1, '__NOW__', '__NOW__'),
+	('status-def-deployment_waiting_approval', 'deployment_waiting_approval', '部署等待批准', 'in_review', '部署阶段等待发布批准。', 1, '__NOW__', '__NOW__'),
+	('status-def-deployment_success', 'deployment_success', '部署成功', 'completed', '部署阶段成功结束。', 1, '__NOW__', '__NOW__'),
+	('status-def-deployment_failed', 'deployment_failed', '部署失败', 'completed', '部署阶段失败结束。', 1, '__NOW__', '__NOW__'),
+	('status-def-deployment_interrupted', 'deployment_interrupted', '部署中断', 'completed', '部署阶段被中断。', 1, '__NOW__', '__NOW__')
+ON CONFLICT(ID_) DO UPDATE SET KEY_=excluded.KEY_, NAME_=excluded.NAME_, COLUMN_KEY_=excluded.COLUMN_KEY_, DESCRIPTION_=excluded.DESCRIPTION_, UPDATED_AT_=excluded.UPDATED_AT_;
 
 -- workflow_stage_def
 INSERT INTO workflow_stage_def (ID_, KEY_, NAME_, DESCRIPTION_, IS_SYSTEM_, CREATED_AT_, UPDATED_AT_)
@@ -190,6 +211,27 @@ ON CONFLICT(ID_) DO UPDATE SET STAGE_ID_=NULL, STATUS_DEF_ID_=excluded.STATUS_DE
 INSERT INTO workflow_status (ID_, WORKFLOW_ID_, STAGE_ID_, STATUS_DEF_ID_, KEY_, NAME_, COLUMN_KEY_, POSITION_, IS_START_, IS_TERMINAL_, IS_ACTIVE_, REVIEW_REQUIRED_)
 VALUES ('workflow-standard-requirement-status-completed', 'workflow-standard-requirement', NULL, 'status-def-completed', 'completed', '已完成', 'completed', 5, 0, 1, 1, 0)
 ON CONFLICT(ID_) DO UPDATE SET STAGE_ID_=NULL, STATUS_DEF_ID_=excluded.STATUS_DEF_ID_, KEY_=excluded.KEY_, NAME_=excluded.NAME_, COLUMN_KEY_=excluded.COLUMN_KEY_, POSITION_=excluded.POSITION_, IS_START_=excluded.IS_START_, IS_TERMINAL_=excluded.IS_TERMINAL_, IS_ACTIVE_=1, REVIEW_REQUIRED_=excluded.REVIEW_REQUIRED_;
+INSERT INTO workflow_status (ID_, WORKFLOW_ID_, STAGE_ID_, STATUS_DEF_ID_, KEY_, NAME_, COLUMN_KEY_, POSITION_, IS_START_, IS_TERMINAL_, IS_ACTIVE_, REVIEW_REQUIRED_)
+VALUES
+	('workflow-standard-requirement-status-waiting_answer', 'workflow-standard-requirement', NULL, 'status-def-waiting_answer', 'waiting_answer', '等待回答', 'in_review', 10, 0, 0, 1, 1),
+	('workflow-standard-requirement-status-waiting_submit', 'workflow-standard-requirement', NULL, 'status-def-waiting_submit', 'waiting_submit', '等待提交', 'in_review', 11, 0, 0, 1, 1),
+	('workflow-standard-requirement-status-waiting_approval', 'workflow-standard-requirement', NULL, 'status-def-waiting_approval', 'waiting_approval', '等待批准', 'in_review', 12, 0, 0, 1, 1),
+	('workflow-standard-requirement-status-success', 'workflow-standard-requirement', NULL, 'status-def-success', 'success', '成功', 'completed', 13, 0, 1, 1, 0),
+	('workflow-standard-requirement-status-failed', 'workflow-standard-requirement', NULL, 'status-def-failed', 'failed', '失败', 'completed', 14, 0, 1, 1, 0),
+	('workflow-standard-requirement-status-interrupted', 'workflow-standard-requirement', NULL, 'status-def-interrupted', 'interrupted', '中断', 'completed', 15, 0, 1, 1, 0),
+	('workflow-standard-requirement-status-testing_waiting_submit', 'workflow-standard-requirement', 'workflow-standard-requirement-stage-testing_acceptance', 'status-def-testing_waiting_submit', 'testing_waiting_submit', '测试等待提交', 'in_review', 40, 0, 0, 1, 1),
+	('workflow-standard-requirement-status-testing_in_progress', 'workflow-standard-requirement', 'workflow-standard-requirement-stage-testing_acceptance', 'status-def-testing_in_progress', 'testing_in_progress', '测试中', 'in_progress', 41, 0, 0, 1, 0),
+	('workflow-standard-requirement-status-testing_waiting_approval', 'workflow-standard-requirement', 'workflow-standard-requirement-stage-testing_acceptance', 'status-def-testing_waiting_approval', 'testing_waiting_approval', '测试等待批准', 'in_review', 42, 0, 0, 1, 1),
+	('workflow-standard-requirement-status-testing_success', 'workflow-standard-requirement', 'workflow-standard-requirement-stage-testing_acceptance', 'status-def-testing_success', 'testing_success', '测试成功', 'completed', 43, 0, 1, 1, 0),
+	('workflow-standard-requirement-status-testing_failed', 'workflow-standard-requirement', 'workflow-standard-requirement-stage-testing_acceptance', 'status-def-testing_failed', 'testing_failed', '测试失败', 'completed', 44, 0, 1, 1, 0),
+	('workflow-standard-requirement-status-testing_interrupted', 'workflow-standard-requirement', 'workflow-standard-requirement-stage-testing_acceptance', 'status-def-testing_interrupted', 'testing_interrupted', '测试中断', 'completed', 45, 0, 1, 1, 0),
+	('workflow-standard-requirement-status-deployment_waiting_submit', 'workflow-standard-requirement', 'workflow-standard-requirement-stage-release', 'status-def-deployment_waiting_submit', 'deployment_waiting_submit', '部署等待提交', 'in_review', 50, 0, 0, 1, 1),
+	('workflow-standard-requirement-status-deployment_in_progress', 'workflow-standard-requirement', 'workflow-standard-requirement-stage-release', 'status-def-deployment_in_progress', 'deployment_in_progress', '部署中', 'in_progress', 51, 0, 0, 1, 0),
+	('workflow-standard-requirement-status-deployment_waiting_approval', 'workflow-standard-requirement', 'workflow-standard-requirement-stage-release', 'status-def-deployment_waiting_approval', 'deployment_waiting_approval', '部署等待批准', 'in_review', 52, 0, 0, 1, 1),
+	('workflow-standard-requirement-status-deployment_success', 'workflow-standard-requirement', 'workflow-standard-requirement-stage-release', 'status-def-deployment_success', 'deployment_success', '部署成功', 'completed', 53, 0, 1, 1, 0),
+	('workflow-standard-requirement-status-deployment_failed', 'workflow-standard-requirement', 'workflow-standard-requirement-stage-release', 'status-def-deployment_failed', 'deployment_failed', '部署失败', 'completed', 54, 0, 1, 1, 0),
+	('workflow-standard-requirement-status-deployment_interrupted', 'workflow-standard-requirement', 'workflow-standard-requirement-stage-release', 'status-def-deployment_interrupted', 'deployment_interrupted', '部署中断', 'completed', 55, 0, 1, 1, 0)
+ON CONFLICT(ID_) DO UPDATE SET STAGE_ID_=excluded.STAGE_ID_, STATUS_DEF_ID_=excluded.STATUS_DEF_ID_, KEY_=excluded.KEY_, NAME_=excluded.NAME_, COLUMN_KEY_=excluded.COLUMN_KEY_, POSITION_=excluded.POSITION_, IS_START_=excluded.IS_START_, IS_TERMINAL_=excluded.IS_TERMINAL_, IS_ACTIVE_=1, REVIEW_REQUIRED_=excluded.REVIEW_REQUIRED_;
 INSERT INTO workflow_status (ID_, WORKFLOW_ID_, STAGE_ID_, STATUS_DEF_ID_, KEY_, NAME_, COLUMN_KEY_, POSITION_, IS_START_, IS_TERMINAL_, IS_ACTIVE_, REVIEW_REQUIRED_)
 VALUES ('workflow-bug-fix-status-backlog', 'workflow-bug-fix', NULL, 'status-def-backlog', 'backlog', '新建', 'backlog', 1, 1, 0, 1, 0)
 ON CONFLICT(ID_) DO UPDATE SET STAGE_ID_=NULL, STATUS_DEF_ID_=excluded.STATUS_DEF_ID_, KEY_=excluded.KEY_, NAME_=excluded.NAME_, COLUMN_KEY_=excluded.COLUMN_KEY_, POSITION_=excluded.POSITION_, IS_START_=excluded.IS_START_, IS_TERMINAL_=excluded.IS_TERMINAL_, IS_ACTIVE_=1, REVIEW_REQUIRED_=excluded.REVIEW_REQUIRED_;

@@ -2060,10 +2060,10 @@ func scanIssue(scanner issueScanner) (kanban.Issue, error) {
 	if issue.StatusKey == "" {
 		issue.StatusKey = string(kanban.StatusBacklog)
 	}
-	issue.Status = kanban.Status(issue.StatusKey)
 	if issue.ColumnKey == "" {
 		issue.ColumnKey = issue.StatusKey
 	}
+	issue.Status = kanban.Status(issue.ColumnKey)
 	if severity.Valid {
 		issue.Severity = kanban.Severity(severity.String)
 	} else {

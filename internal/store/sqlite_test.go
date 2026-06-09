@@ -137,7 +137,7 @@ func TestWorkflowStatusContractForIssueStatusFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	allowed := map[string]bool{
+	allowedColumnKeys := map[string]bool{
 		"backlog": true, "todo": true, "in_progress": true, "in_review": true, "completed": true,
 	}
 	rows, err := sqliteStore.db.QueryContext(ctx, `
@@ -153,13 +153,13 @@ func TestWorkflowStatusContractForIssueStatusFields(t *testing.T) {
 		if err := rows.Scan(&key, &name, &columnKey); err != nil {
 			t.Fatal(err)
 		}
-		if !allowed[key] {
-			t.Fatalf("unexpected workflow_status KEY_: %s", key)
-		}
 		if strings.TrimSpace(name) == "" {
 			t.Fatalf("workflow_status %s has empty NAME_", key)
 		}
-		if !allowed[columnKey] {
+		if strings.TrimSpace(key) == "" {
+			t.Fatal("workflow_status has empty KEY_")
+		}
+		if !allowedColumnKeys[columnKey] {
 			t.Fatalf("unexpected workflow_status COLUMN_KEY_: %s", columnKey)
 		}
 	}
@@ -172,8 +172,8 @@ func TestWorkflowStatusContractForIssueStatusFields(t *testing.T) {
 		BoardID:        kanban.DefaultBoardID,
 		ProjectID:      kanban.DefaultProjectID,
 		WorkflowID:     kanban.DefaultWorkflowID,
-		StageID:        "workflow-standard-requirement-stage-requirement_clarification",
-		StatusID:       "workflow-standard-requirement-status-in_review",
+		StageID:        "workflow-standard-requirement-stage-solution_design",
+		StatusID:       "workflow-standard-requirement-status-waiting_approval",
 		ID:             "status-contract-issue",
 		Title:          "Status contract issue",
 		Description:    "",
@@ -199,10 +199,10 @@ func TestWorkflowStatusContractForIssueStatusFields(t *testing.T) {
 	if got.StatusID != issue.StatusID {
 		t.Fatalf("statusId mismatch: got %s want %s", got.StatusID, issue.StatusID)
 	}
-	if got.StatusKey != "in_review" {
+	if got.StatusKey != "waiting_approval" {
 		t.Fatalf("statusKey mismatch: got %s", got.StatusKey)
 	}
-	if got.StatusName != "待审查" {
+	if got.StatusName != "等待批准" {
 		t.Fatalf("statusName mismatch: got %s", got.StatusName)
 	}
 	if got.Status != kanban.StatusInReview {
@@ -248,8 +248,8 @@ func TestDemoSQLResolvesIssueStatusFields(t *testing.T) {
 	`).Scan(&issueCount); err != nil {
 		t.Fatal(err)
 	}
-	if issueCount == 0 {
-		t.Fatal("expected demo issues to be inserted")
+	if issueCount != 100 {
+		t.Fatalf("expected 100 demo issues to be inserted, got %d", issueCount)
 	}
 
 	var missingStatusCount int
@@ -264,6 +264,57 @@ func TestDemoSQLResolvesIssueStatusFields(t *testing.T) {
 	}
 	if missingStatusCount != 0 {
 		t.Fatalf("expected all demo issues to resolve statusKey/statusName, got %d missing", missingStatusCount)
+	}
+
+	expectedStatuses := map[string]string{
+		"waiting_answer":              "等待回答",
+		"waiting_submit":              "等待提交",
+		"waiting_approval":            "等待批准",
+		"success":                     "成功",
+		"failed":                      "失败",
+		"interrupted":                 "中断",
+		"testing_waiting_submit":      "测试等待提交",
+		"testing_in_progress":         "测试中",
+		"testing_waiting_approval":    "测试等待批准",
+		"testing_success":             "测试成功",
+		"testing_failed":              "测试失败",
+		"testing_interrupted":         "测试中断",
+		"deployment_waiting_submit":   "部署等待提交",
+		"deployment_in_progress":      "部署中",
+		"deployment_waiting_approval": "部署等待批准",
+		"deployment_success":          "部署成功",
+		"deployment_failed":           "部署失败",
+		"deployment_interrupted":      "部署中断",
+	}
+	for statusKey, statusName := range expectedStatuses {
+		var count int
+		if err := sqliteStore.db.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM issue i
+			JOIN workflow_status wst ON wst.ID_ = i.STATUS_ID_
+			WHERE i.ID_ LIKE 'demo-issue-%'
+				AND wst.KEY_ = ?
+				AND wst.NAME_ = ?
+		`, statusKey, statusName).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count == 0 {
+			t.Fatalf("expected demo issues to include statusKey=%s statusName=%s", statusKey, statusName)
+		}
+	}
+
+	var invalidColumnKeyCount int
+	if err := sqliteStore.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM issue i
+		JOIN workflow_status wst ON wst.ID_ = i.STATUS_ID_
+		WHERE i.ID_ LIKE 'demo-issue-%'
+			AND wst.COLUMN_KEY_ NOT IN ('backlog','todo','in_progress','in_review','completed')
+	`).Scan(&invalidColumnKeyCount); err != nil {
+		t.Fatal(err)
+	}
+	if invalidColumnKeyCount != 0 {
+		t.Fatalf("expected demo issues to use only board column status values, got %d invalid", invalidColumnKeyCount)
 	}
 }
 

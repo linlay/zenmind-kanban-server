@@ -121,9 +121,9 @@ if [ -n "$FK_ERRORS" ]; then
 	exit 1
 fi
 
-INVALID_STATUS_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM workflow_status WHERE KEY_ NOT IN ('backlog','todo','in_progress','in_review','completed');")
+INVALID_STATUS_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM workflow_status WHERE COLUMN_KEY_ NOT IN ('backlog','todo','in_progress','in_review','completed');")
 if [ "$INVALID_STATUS_COUNT" != "0" ]; then
-	echo "workflow_status contains non-standard KEY_ values" >&2
+	echo "workflow_status contains non-standard COLUMN_KEY_ values" >&2
 	exit 1
 fi
 
