@@ -10,16 +10,36 @@ seq(n) AS (
 base36_chars(chars) AS (
 	VALUES ('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')
 ),
-issue_ids(n, issue_id) AS (
+timestamp_seed(seed) AS (
+	VALUES (
+		CAST(strftime('%s', '__NOW__') AS INTEGER) * 10 +
+		CAST(substr(strftime('%f', '__NOW__'), 4, 1) AS INTEGER)
+	)
+),
+issue_values(n, tick) AS (
 	SELECT
 		seq.n,
-		'DEMO' ||
-			CASE
-				WHEN seq.n < 36 THEN substr(base36_chars.chars, seq.n + 1, 1)
-				ELSE substr(base36_chars.chars, (seq.n / 36) + 1, 1) || substr(base36_chars.chars, (seq.n % 36) + 1, 1)
-			END
+		timestamp_seed.seed + seq.n - 1
 	FROM seq
+	CROSS JOIN timestamp_seed
+),
+issue_digits(n, tick, remaining, issue_id) AS (
+	SELECT n, tick, tick, ''
+	FROM issue_values
+	UNION ALL
+	SELECT
+		issue_digits.n,
+		issue_digits.tick,
+		issue_digits.remaining / 36,
+		substr(base36_chars.chars, (issue_digits.remaining % 36) + 1, 1) || issue_digits.issue_id
+	FROM issue_digits
 	CROSS JOIN base36_chars
+	WHERE issue_digits.remaining > 0
+),
+issue_ids(n, issue_id) AS (
+	SELECT n, issue_id
+	FROM issue_digits
+	WHERE remaining = 0
 ),
 project_cycle(idx, project_id) AS (
 	VALUES
@@ -76,7 +96,7 @@ SELECT
 		WHEN seq.n % 11 = 0 THEN status_cycle.title || '：请同时检查 status、statusKey、statusName 展示，审批等待文案、失败中断成功结果分支，以及跨项目筛选后的卡片排序是否仍然稳定'
 		WHEN seq.n % 8 = 0 THEN status_cycle.title || '：覆盖移动端窄屏、桌面端看板列拖拽、状态细分映射、历史数据兼容和异常恢复路径，确保负责人可以直接读完整上下文'
 		ELSE status_cycle.title
-	END || ' #' || issue_ids.issue_id,
+	END,
 	'',
 	CASE seq.n % 3
 		WHEN 0 THEN 'high'

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -227,7 +228,8 @@ func TestDemoSQLResolvesIssueStatusFields(t *testing.T) {
 	if err := sqliteStore.SeedDefaults(ctx); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	nowTime := time.Date(2026, time.June, 9, 6, 39, 39, 123456789, time.UTC)
+	now := nowTime.Format(time.RFC3339Nano)
 	for _, file := range []string{
 		filepath.Join("..", "..", "cmd", "demo", "01_projects.sql"),
 		filepath.Join("..", "..", "cmd", "demo", "02_issues.sql"),
@@ -265,12 +267,25 @@ func TestDemoSQLResolvesIssueStatusFields(t *testing.T) {
 		t.Fatalf("expected demo issues to include many long titles, got %d", longTitleCount)
 	}
 
+	var titleContainsIDCount int
+	if err := sqliteStore.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM issue
+		WHERE CREATED_BY_ = 'demo'
+			AND instr(TITLE_, ID_) > 0
+	`).Scan(&titleContainsIDCount); err != nil {
+		t.Fatal(err)
+	}
+	if titleContainsIDCount != 0 {
+		t.Fatalf("expected demo issue titles not to include their ids, got %d", titleContainsIDCount)
+	}
+
 	var invalidIssueIDCount int
 	if err := sqliteStore.db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM issue
 		WHERE CREATED_BY_ = 'demo'
-			AND (ID_ GLOB '*[^0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ]*' OR ID_ NOT GLOB 'DEMO*')
+			AND (ID_ GLOB '*[^0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ]*' OR ID_ GLOB 'DEMO*')
 	`).Scan(&invalidIssueIDCount); err != nil {
 		t.Fatal(err)
 	}
@@ -279,16 +294,23 @@ func TestDemoSQLResolvesIssueStatusFields(t *testing.T) {
 	}
 
 	var sampleBase36IDCount int
+	timestampTick := nowTime.UnixMilli() / 100
+	expectedBase36IDs := []string{
+		strings.ToUpper(strconv.FormatInt(timestampTick, 36)),
+		strings.ToUpper(strconv.FormatInt(timestampTick+9, 36)),
+		strings.ToUpper(strconv.FormatInt(timestampTick+35, 36)),
+		strings.ToUpper(strconv.FormatInt(timestampTick+199, 36)),
+	}
 	if err := sqliteStore.db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM issue
 		WHERE CREATED_BY_ = 'demo'
-			AND ID_ IN ('DEMO1', 'DEMOA', 'DEMO10', 'DEMO5K')
-	`).Scan(&sampleBase36IDCount); err != nil {
+			AND ID_ IN (?, ?, ?, ?)
+	`, expectedBase36IDs[0], expectedBase36IDs[1], expectedBase36IDs[2], expectedBase36IDs[3]).Scan(&sampleBase36IDCount); err != nil {
 		t.Fatal(err)
 	}
 	if sampleBase36IDCount != 4 {
-		t.Fatalf("expected demo issues to include base36 ids DEMO1, DEMOA, DEMO10, DEMO5K; got %d", sampleBase36IDCount)
+		t.Fatalf("expected demo issues to include timestamp base36 ids %v; got %d", expectedBase36IDs, sampleBase36IDCount)
 	}
 
 	var missingStatusCount int
