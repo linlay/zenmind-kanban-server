@@ -293,7 +293,7 @@ func (s *Service) TransitionIssue(ctx context.Context, boardID string, projectID
 	if err != nil {
 		return ChangeResult{}, err
 	}
-	return ChangeResult{
+	return s.withProjectIssueStats(ctx, boardID, ChangeResult{
 		OK:        true,
 		Message:   transition.Name + " 已完成。",
 		BoardID:   boardID,
@@ -301,7 +301,7 @@ func (s *Service) TransitionIssue(ctx context.Context, boardID string, projectID
 		Revision:  nextRevision,
 		Issue:     findIssue(issues, issue.ID),
 		Issues:    issues,
-	}, nil
+	})
 }
 
 func (s *Service) freeTransition(
@@ -371,7 +371,7 @@ func (s *Service) freeTransition(
 	if err != nil {
 		return ChangeResult{}, err
 	}
-	return ChangeResult{
+	return s.withProjectIssueStats(ctx, boardID, ChangeResult{
 		OK:        true,
 		Message:   "自由流转已完成。",
 		BoardID:   boardID,
@@ -379,7 +379,7 @@ func (s *Service) freeTransition(
 		Revision:  nextRevision,
 		Issue:     findIssue(issues, issue.ID),
 		Issues:    issues,
-	}, nil
+	})
 }
 
 func findWorkflowByID(catalog WorkflowCatalog, workflowID string) *Workflow {
@@ -511,7 +511,6 @@ func (s *Service) DeleteWorkflow(ctx context.Context, id string, actor string) (
 func createWorkflowID() string {
 	return "wf-" + strings.ToLower(hex.EncodeToString([]byte(time.Now().UTC().Format("20060102150405.000000000"))))
 }
-
 
 func validTeamRole(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {

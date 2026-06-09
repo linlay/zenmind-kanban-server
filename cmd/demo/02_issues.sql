@@ -1,11 +1,25 @@
 -- Clean old demo issues
-DELETE FROM issue WHERE ID_ LIKE 'demo-issue-%';
+DELETE FROM issue WHERE ID_ LIKE 'demo-issue-%' OR CREATED_BY_ = 'demo' OR UPDATED_BY_ = 'demo';
 
 WITH RECURSIVE
 seq(n) AS (
 	VALUES (1)
 	UNION ALL
-	SELECT n + 1 FROM seq WHERE n < 100
+	SELECT n + 1 FROM seq WHERE n < 200
+),
+base36_chars(chars) AS (
+	VALUES ('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+),
+issue_ids(n, issue_id) AS (
+	SELECT
+		seq.n,
+		'DEMO' ||
+			CASE
+				WHEN seq.n < 36 THEN substr(base36_chars.chars, seq.n + 1, 1)
+				ELSE substr(base36_chars.chars, (seq.n / 36) + 1, 1) || substr(base36_chars.chars, (seq.n % 36) + 1, 1)
+			END
+	FROM seq
+	CROSS JOIN base36_chars
 ),
 project_cycle(idx, project_id) AS (
 	VALUES
@@ -49,15 +63,20 @@ status_cycle(idx, stage_id, status_id, title, review_required) AS (
 INSERT INTO issue (
 	ID_, PROJECT_ID_, WORKFLOW_ID_, STAGE_ID_, STATUS_ID_,
 	TITLE_, DESCRIPTION_, PRIORITY_, SEVERITY_, POSITION_,
-	REVIEW_REQUIRED_, REVISION_, CREATED_AT_, UPDATED_AT_
+	REVIEW_REQUIRED_, REVISION_, CREATED_BY_, UPDATED_BY_, CREATED_AT_, UPDATED_AT_
 )
 SELECT
-	printf('demo-issue-%03d', seq.n),
+	issue_ids.issue_id,
 	project_cycle.project_id,
 	'workflow-standard-requirement',
 	status_cycle.stage_id,
 	status_cycle.status_id,
-	status_cycle.title || printf(' #%03d', seq.n),
+	CASE
+		WHEN seq.n % 13 = 0 THEN status_cycle.title || '：这是一个用于验证长标题完整换行显示的演示 issue，标题故意写得很长以超过两行，并保留阶段标签、细分状态、负责人上下文和关键验收条件'
+		WHEN seq.n % 11 = 0 THEN status_cycle.title || '：请同时检查 status、statusKey、statusName 展示，审批等待文案、失败中断成功结果分支，以及跨项目筛选后的卡片排序是否仍然稳定'
+		WHEN seq.n % 8 = 0 THEN status_cycle.title || '：覆盖移动端窄屏、桌面端看板列拖拽、状态细分映射、历史数据兼容和异常恢复路径，确保负责人可以直接读完整上下文'
+		ELSE status_cycle.title
+	END || ' #' || issue_ids.issue_id,
 	'',
 	CASE seq.n % 3
 		WHEN 0 THEN 'high'
@@ -73,8 +92,11 @@ SELECT
 	CAST(((seq.n - 1) / 23) AS REAL) * 100 + status_cycle.idx + 1,
 	status_cycle.review_required,
 	0,
+	'demo',
+	'demo',
 	'__NOW__',
 	'__NOW__'
 FROM seq
+JOIN issue_ids ON issue_ids.n = seq.n
 JOIN project_cycle ON project_cycle.idx = ((seq.n - 1) % 10)
 JOIN status_cycle ON status_cycle.idx = ((seq.n - 1) % 23);

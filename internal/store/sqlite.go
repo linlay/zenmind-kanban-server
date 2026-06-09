@@ -1362,6 +1362,35 @@ func (s *Store) ListIssues(ctx context.Context, boardID string, projectID string
 	return kanban.SortIssues(issues), revision, nil
 }
 
+func (s *Store) ListProjectIssueStats(ctx context.Context, boardID string) ([]kanban.ProjectIssueStat, error) {
+	_ = boardID
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT p.ID_,
+			COUNT(i.ID_) AS ISSUE_COUNT_,
+			COALESCE(SUM(CASE WHEN wst.COLUMN_KEY_ = ? THEN 1 ELSE 0 END), 0) AS IN_PROGRESS_ISSUE_COUNT_
+		FROM project p
+		LEFT JOIN project_closure pc ON pc.ANCESTOR_ID_ = p.ID_
+		LEFT JOIN issue i ON i.PROJECT_ID_ = pc.DESCENDANT_ID_ AND i.DELETED_AT_ IS NULL
+		LEFT JOIN workflow_status wst ON wst.ID_ = i.STATUS_ID_
+		WHERE p.DELETED_AT_ IS NULL
+		GROUP BY p.ID_, p.PATH_, p.POSITION_
+		ORDER BY p.PATH_ ASC, p.POSITION_ ASC, p.ID_ ASC
+	`, string(kanban.StatusInProgress))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var stats []kanban.ProjectIssueStat
+	for rows.Next() {
+		var stat kanban.ProjectIssueStat
+		if err := rows.Scan(&stat.ProjectID, &stat.IssueCount, &stat.InProgressIssueCount); err != nil {
+			return nil, err
+		}
+		stats = append(stats, stat)
+	}
+	return stats, rows.Err()
+}
+
 func (s *Store) GetIssue(ctx context.Context, boardID string, issueID string) (*kanban.Issue, error) {
 	rows, err := s.db.QueryContext(ctx, issueSelectSQL(`
 		WHERE i.ID_ = ? AND i.DELETED_AT_ IS NULL

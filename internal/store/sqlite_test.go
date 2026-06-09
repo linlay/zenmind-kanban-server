@@ -244,12 +244,51 @@ func TestDemoSQLResolvesIssueStatusFields(t *testing.T) {
 
 	var issueCount int
 	if err := sqliteStore.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM issue WHERE ID_ LIKE 'demo-issue-%'
+		SELECT COUNT(*) FROM issue WHERE CREATED_BY_ = 'demo'
 	`).Scan(&issueCount); err != nil {
 		t.Fatal(err)
 	}
-	if issueCount != 100 {
-		t.Fatalf("expected 100 demo issues to be inserted, got %d", issueCount)
+	if issueCount != 200 {
+		t.Fatalf("expected 200 demo issues to be inserted, got %d", issueCount)
+	}
+
+	var longTitleCount int
+	if err := sqliteStore.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM issue
+		WHERE CREATED_BY_ = 'demo'
+			AND length(TITLE_) >= 70
+	`).Scan(&longTitleCount); err != nil {
+		t.Fatal(err)
+	}
+	if longTitleCount < 30 {
+		t.Fatalf("expected demo issues to include many long titles, got %d", longTitleCount)
+	}
+
+	var invalidIssueIDCount int
+	if err := sqliteStore.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM issue
+		WHERE CREATED_BY_ = 'demo'
+			AND (ID_ GLOB '*[^0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ]*' OR ID_ NOT GLOB 'DEMO*')
+	`).Scan(&invalidIssueIDCount); err != nil {
+		t.Fatal(err)
+	}
+	if invalidIssueIDCount != 0 {
+		t.Fatalf("expected demo issue ids to be uppercase base36 strings, got %d invalid", invalidIssueIDCount)
+	}
+
+	var sampleBase36IDCount int
+	if err := sqliteStore.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM issue
+		WHERE CREATED_BY_ = 'demo'
+			AND ID_ IN ('DEMO1', 'DEMOA', 'DEMO10', 'DEMO5K')
+	`).Scan(&sampleBase36IDCount); err != nil {
+		t.Fatal(err)
+	}
+	if sampleBase36IDCount != 4 {
+		t.Fatalf("expected demo issues to include base36 ids DEMO1, DEMOA, DEMO10, DEMO5K; got %d", sampleBase36IDCount)
 	}
 
 	var missingStatusCount int
@@ -257,7 +296,7 @@ func TestDemoSQLResolvesIssueStatusFields(t *testing.T) {
 		SELECT COUNT(*)
 		FROM issue i
 		LEFT JOIN workflow_status wst ON wst.ID_ = i.STATUS_ID_
-		WHERE i.ID_ LIKE 'demo-issue-%'
+		WHERE i.CREATED_BY_ = 'demo'
 			AND (wst.ID_ IS NULL OR wst.KEY_ = '' OR wst.NAME_ = '')
 	`).Scan(&missingStatusCount); err != nil {
 		t.Fatal(err)
@@ -292,7 +331,7 @@ func TestDemoSQLResolvesIssueStatusFields(t *testing.T) {
 			SELECT COUNT(*)
 			FROM issue i
 			JOIN workflow_status wst ON wst.ID_ = i.STATUS_ID_
-			WHERE i.ID_ LIKE 'demo-issue-%'
+			WHERE i.CREATED_BY_ = 'demo'
 				AND wst.KEY_ = ?
 				AND wst.NAME_ = ?
 		`, statusKey, statusName).Scan(&count); err != nil {
@@ -308,7 +347,7 @@ func TestDemoSQLResolvesIssueStatusFields(t *testing.T) {
 		SELECT COUNT(*)
 		FROM issue i
 		JOIN workflow_status wst ON wst.ID_ = i.STATUS_ID_
-		WHERE i.ID_ LIKE 'demo-issue-%'
+		WHERE i.CREATED_BY_ = 'demo'
 			AND wst.COLUMN_KEY_ NOT IN ('backlog','todo','in_progress','in_review','completed')
 	`).Scan(&invalidColumnKeyCount); err != nil {
 		t.Fatal(err)

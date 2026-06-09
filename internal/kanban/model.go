@@ -65,6 +65,12 @@ type Project struct {
 	UpdatedBy         *string    `json:"updatedBy,omitempty"`
 }
 
+type ProjectIssueStat struct {
+	ProjectID            string `json:"projectId"`
+	IssueCount           int    `json:"issueCount"`
+	InProgressIssueCount int    `json:"inProgressIssueCount"`
+}
+
 type ProjectInput struct {
 	ParentID          *string  `json:"parentId"`
 	Name              string   `json:"name"`
@@ -281,6 +287,7 @@ type ListResult struct {
 	Scope               string               `json:"scope"`
 	Projects            []Project            `json:"projects"`
 	Issues              []Issue              `json:"issues"`
+	ProjectIssueStats   []ProjectIssueStat   `json:"projectIssueStats"`
 	Users               []UserAccount        `json:"users"`
 	Workflows           []Workflow           `json:"workflows"`
 	WorkflowStageDefs   []WorkflowStageDef   `json:"workflowStageDefs"`
@@ -315,17 +322,18 @@ type IssuesResult struct {
 }
 
 type ChangeResult struct {
-	OK             bool    `json:"ok"`
-	Code           string  `json:"code,omitempty"`
-	Message        string  `json:"message"`
-	BoardID        string  `json:"boardId"`
-	ProjectID      string  `json:"projectId"`
-	Revision       int64   `json:"revision"`
-	Complete       bool    `json:"complete"`
-	Scope          string  `json:"scope"`
-	Issue          *Issue  `json:"issue,omitempty"`
-	Issues         []Issue `json:"issues"`
-	DeletedIssueID string  `json:"deletedIssueId,omitempty"`
+	OK                bool               `json:"ok"`
+	Code              string             `json:"code,omitempty"`
+	Message           string             `json:"message"`
+	BoardID           string             `json:"boardId"`
+	ProjectID         string             `json:"projectId"`
+	Revision          int64              `json:"revision"`
+	Complete          bool               `json:"complete"`
+	Scope             string             `json:"scope"`
+	Issue             *Issue             `json:"issue,omitempty"`
+	Issues            []Issue            `json:"issues"`
+	ProjectIssueStats []ProjectIssueStat `json:"projectIssueStats,omitempty"`
+	DeletedIssueID    string             `json:"deletedIssueId,omitempty"`
 }
 
 type ProjectChangeResult struct {

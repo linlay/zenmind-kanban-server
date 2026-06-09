@@ -546,6 +546,80 @@ func TestServiceSnapshotsProjectSubtree(t *testing.T) {
 	}
 }
 
+func TestServiceSnapshotIncludesGlobalProjectIssueStats(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	a := createProject(t, service, kanban.DefaultProjectID, "a")
+	a1 := createProject(t, service, a.ID, "a1")
+	empty := createProject(t, service, kanban.DefaultProjectID, "empty")
+	createIssueInProject(t, service, a.ID, "parent issue")
+	childIssue := createIssueInProject(t, service, a1.ID, "child issue")
+
+	move, err := service.MoveIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.MoveInput{
+		ID:       childIssue.ID,
+		Status:   string(kanban.StatusInProgress),
+		Position: 1,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !move.OK {
+		t.Fatalf("expected move to in_progress to succeed: %#v", move)
+	}
+
+	snapshot, err := service.Snapshot(context.Background(), kanban.DefaultBoardID, a1.ID, kanban.DesktopStatus{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := projectIssueStatMap(snapshot.ProjectIssueStats)
+	if stat := stats[a.ID]; stat.IssueCount != 2 || stat.InProgressIssueCount != 1 {
+		t.Fatalf("expected parent subtree stats 2/1, got %#v", stat)
+	}
+	if stat := stats[a1.ID]; stat.IssueCount != 1 || stat.InProgressIssueCount != 1 {
+		t.Fatalf("expected child stats 1/1, got %#v", stat)
+	}
+	if stat := stats[empty.ID]; stat.IssueCount != 0 || stat.InProgressIssueCount != 0 {
+		t.Fatalf("expected zero-count project stats 0/0, got %#v", stat)
+	}
+}
+
+func TestServiceIssueChangeResponsesIncludeProjectIssueStats(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	a := createProject(t, service, kanban.DefaultProjectID, "a")
+
+	create, err := service.CreateIssue(context.Background(), kanban.DefaultBoardID, kanban.IssueInput{Title: "new issue", ProjectID: &a.ID}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !create.OK || create.Issue == nil {
+		t.Fatalf("expected issue create to succeed: %#v", create)
+	}
+	if stat := projectIssueStatMap(create.ProjectIssueStats)[a.ID]; stat.IssueCount != 1 || stat.InProgressIssueCount != 0 {
+		t.Fatalf("expected create stats 1/0, got %#v", stat)
+	}
+
+	move, err := service.MoveIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.MoveInput{
+		ID:       create.Issue.ID,
+		Status:   string(kanban.StatusInProgress),
+		Position: 1,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat := projectIssueStatMap(move.ProjectIssueStats)[a.ID]; stat.IssueCount != 1 || stat.InProgressIssueCount != 1 {
+		t.Fatalf("expected move stats 1/1, got %#v", stat)
+	}
+
+	deleteResult, err := service.DeleteIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, create.Issue.ID, nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat := projectIssueStatMap(deleteResult.ProjectIssueStats)[a.ID]; stat.IssueCount != 0 || stat.InProgressIssueCount != 0 {
+		t.Fatalf("expected delete stats 0/0, got %#v", stat)
+	}
+}
+
 func TestServiceKeepsParentProjectOwnIssuesSeparate(t *testing.T) {
 	service, closeStore := newTestService(t)
 	defer closeStore()
@@ -751,6 +825,14 @@ func issueIDSet(issues []kanban.Issue) map[string]bool {
 	result := map[string]bool{}
 	for _, issue := range issues {
 		result[issue.ID] = true
+	}
+	return result
+}
+
+func projectIssueStatMap(stats []kanban.ProjectIssueStat) map[string]kanban.ProjectIssueStat {
+	result := map[string]kanban.ProjectIssueStat{}
+	for _, stat := range stats {
+		result[stat.ProjectID] = stat
 	}
 	return result
 }

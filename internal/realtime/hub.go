@@ -557,6 +557,7 @@ func (h *Hub) applyDesktopSnapshotScope(session *Session, snapshot *kanban.ListR
 	currentUserID := strings.TrimSpace(session.currentUser.ID)
 	if currentUserID == "" {
 		snapshot.Issues = []kanban.Issue{}
+		snapshot.ProjectIssueStats = kanban.ComputeProjectIssueStats(snapshot.Projects, snapshot.Issues)
 		snapshot.IssueLabelLinks = []kanban.IssueLabelLink{}
 		snapshot.IssueDependencies = []kanban.IssueDependency{}
 		snapshot.Reviews = []kanban.Review{}
@@ -577,6 +578,7 @@ func (h *Hub) applyDesktopSnapshotScope(session *Session, snapshot *kanban.ListR
 		issueIDs[issue.ID] = true
 	}
 	snapshot.Issues = filteredIssues
+	snapshot.ProjectIssueStats = kanban.ComputeProjectIssueStats(snapshot.Projects, snapshot.Issues)
 
 	snapshot.IssueLabelLinks = filterSlice(snapshot.IssueLabelLinks, func(link kanban.IssueLabelLink) bool {
 		return issueIDs[link.IssueID]
@@ -681,15 +683,15 @@ func (h *Hub) assignAndRun(session *Session, env Envelope) {
 		}
 	}
 	if issue == nil {
-		session.respond(env, kanban.ChangeResult{OK: false, Message: "任务不存在。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues})
+		session.respond(env, kanban.ChangeResult{OK: false, Message: "任务不存在。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues, ProjectIssueStats: snapshot.ProjectIssueStats})
 		return
 	}
 	if input.BaseIssueRevision != nil && *input.BaseIssueRevision > 0 && *input.BaseIssueRevision != issue.Revision {
-		session.respond(env, kanban.ChangeResult{OK: false, Code: "conflict", Message: "任务已被其他端更新，请刷新后重试。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issue: issue, Issues: kanban.SortIssues(snapshot.Issues)})
+		session.respond(env, kanban.ChangeResult{OK: false, Code: "conflict", Message: "任务已被其他端更新，请刷新后重试。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issue: issue, Issues: kanban.SortIssues(snapshot.Issues), ProjectIssueStats: snapshot.ProjectIssueStats})
 		return
 	}
 	if issue.RunID != nil && strings.TrimSpace(*issue.RunID) != "" {
-		session.respond(env, kanban.ChangeResult{OK: true, Message: "任务已在运行中。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issue: issue, Issues: kanban.SortIssues(snapshot.Issues)})
+		session.respond(env, kanban.ChangeResult{OK: true, Message: "任务已在运行中。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issue: issue, Issues: kanban.SortIssues(snapshot.Issues), ProjectIssueStats: snapshot.ProjectIssueStats})
 		return
 	}
 	agentKey := input.AgentKey
@@ -704,11 +706,11 @@ func (h *Hub) assignAndRun(session *Session, env Envelope) {
 		}
 		response, err := h.requestDesktop("desktop.assistant.startRun", env.BoardID, env.ProjectID, input.TargetDesktopSessionID, payload)
 		if err != nil {
-			return kanban.ChangeResult{OK: false, Message: err.Error(), BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues}, nil
+			return kanban.ChangeResult{OK: false, Message: err.Error(), BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues, ProjectIssueStats: snapshot.ProjectIssueStats}, nil
 		}
 		var result kanban.StartRunResult
 		if err := json.Unmarshal(response.Payload, &result); err != nil {
-			return kanban.ChangeResult{OK: false, Message: "desktop 返回格式无效。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues}, nil
+			return kanban.ChangeResult{OK: false, Message: "desktop 返回格式无效。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues, ProjectIssueStats: snapshot.ProjectIssueStats}, nil
 		}
 		change, err := h.service.StartRun(context.Background(), env.BoardID, env.ProjectID, input.ID, agentKey, result, session.actorID())
 		if err != nil {
@@ -761,7 +763,7 @@ func (h *Hub) dispatchToDesktop(session *Session, env Envelope) {
 			}
 		}
 		if issue == nil {
-			session.respond(env, kanban.ChangeResult{OK: false, Message: "任务不存在。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues})
+			session.respond(env, kanban.ChangeResult{OK: false, Message: "任务不存在。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues, ProjectIssueStats: snapshot.ProjectIssueStats})
 			return
 		}
 	}

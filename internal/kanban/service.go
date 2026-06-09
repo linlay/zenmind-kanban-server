@@ -16,6 +16,7 @@ type Repository interface {
 	ListWorkflowCatalog(ctx context.Context) (WorkflowCatalog, error)
 	ListProjects(ctx context.Context) ([]Project, error)
 	ListIssues(ctx context.Context, boardID string, projectID string) ([]Issue, int64, error)
+	ListProjectIssueStats(ctx context.Context, boardID string) ([]ProjectIssueStat, error)
 	ListUsers(ctx context.Context) ([]UserAccount, error)
 	ListTeamMembers(ctx context.Context) ([]TeamMember, error)
 	ListAgents(ctx context.Context) ([]Agent, error)
@@ -173,6 +174,10 @@ func (s *Service) Snapshot(ctx context.Context, boardID string, projectID string
 			}
 		}
 	}
+	projectIssueStats, err := s.repo.ListProjectIssueStats(ctx, boardID)
+	if err != nil {
+		return ListResult{}, err
+	}
 	users, err := s.repo.ListUsers(ctx)
 	if err != nil {
 		return ListResult{}, err
@@ -229,6 +234,7 @@ func (s *Service) Snapshot(ctx context.Context, boardID string, projectID string
 		Scope:               "project",
 		Projects:            projects,
 		Issues:              issues,
+		ProjectIssueStats:   projectIssueStats,
 		Users:               users,
 		Workflows:           catalog.Workflows,
 		WorkflowStageDefs:   catalog.WorkflowStageDefs,
@@ -421,7 +427,7 @@ func (s *Service) CreateIssue(ctx context.Context, boardID string, input IssueIn
 		return ChangeResult{}, err
 	}
 	issue.Revision = nextRevision
-	return ChangeResult{
+	return s.withProjectIssueStats(ctx, boardID, ChangeResult{
 		OK:        true,
 		Message:   "issue 已创建。",
 		BoardID:   boardID,
@@ -431,7 +437,7 @@ func (s *Service) CreateIssue(ctx context.Context, boardID string, input IssueIn
 		Scope:     "project",
 		Issue:     findIssue(issues, issue.ID),
 		Issues:    issues,
-	}, nil
+	})
 }
 
 func (s *Service) UpdateIssue(ctx context.Context, boardID string, projectID string, issueID string, input IssueUpdateInput, actor string) (ChangeResult, error) {
@@ -511,7 +517,7 @@ func (s *Service) MoveIssue(ctx context.Context, boardID string, projectID strin
 	if err != nil {
 		return ChangeResult{}, err
 	}
-	return ChangeResult{
+	return s.withProjectIssueStats(ctx, boardID, ChangeResult{
 		OK:        true,
 		Message:   "issue 已移动。",
 		BoardID:   boardID,
@@ -521,7 +527,7 @@ func (s *Service) MoveIssue(ctx context.Context, boardID string, projectID strin
 		Scope:     "project",
 		Issue:     findIssue(issues, input.ID),
 		Issues:    issues,
-	}, nil
+	})
 }
 
 func (s *Service) DeleteIssue(ctx context.Context, boardID string, projectID string, issueID string, baseIssueRevision *int64, actor string) (ChangeResult, error) {
@@ -546,7 +552,7 @@ func (s *Service) DeleteIssue(ctx context.Context, boardID string, projectID str
 	if err != nil {
 		return ChangeResult{}, err
 	}
-	return ChangeResult{
+	return s.withProjectIssueStats(ctx, boardID, ChangeResult{
 		OK:             true,
 		Message:        "issue 已删除。",
 		BoardID:        boardID,
@@ -556,7 +562,7 @@ func (s *Service) DeleteIssue(ctx context.Context, boardID string, projectID str
 		Scope:          "project",
 		DeletedIssueID: issueID,
 		Issues:         issues,
-	}, nil
+	})
 }
 
 func (s *Service) SyncAssistantEvent(ctx context.Context, boardID string, projectID string, event AssistantEvent, actor string) (ChangeResult, error) {
@@ -633,7 +639,7 @@ func (s *Service) SyncAssistantEvent(ctx context.Context, boardID string, projec
 	if err != nil {
 		return ChangeResult{}, err
 	}
-	return ChangeResult{
+	return s.withProjectIssueStats(ctx, boardID, ChangeResult{
 		OK:        true,
 		Message:   "task 运行状态已更新。",
 		BoardID:   boardID,
@@ -643,7 +649,7 @@ func (s *Service) SyncAssistantEvent(ctx context.Context, boardID string, projec
 		Scope:     "project",
 		Issue:     findIssue(issues, issue.ID),
 		Issues:    issues,
-	}, nil
+	})
 }
 
 func (s *Service) updateIssue(
@@ -864,7 +870,7 @@ func (s *Service) updateIssue(
 	if err != nil {
 		return ChangeResult{}, err
 	}
-	return ChangeResult{
+	return s.withProjectIssueStats(ctx, boardID, ChangeResult{
 		OK:        true,
 		Message:   message,
 		BoardID:   boardID,
@@ -874,7 +880,7 @@ func (s *Service) updateIssue(
 		Scope:     "project",
 		Issue:     findIssue(issues, issueID),
 		Issues:    issues,
-	}, nil
+	})
 }
 
 func (s *Service) CreateProject(ctx context.Context, input ProjectInput, actor string) (ProjectChangeResult, error) {
@@ -1047,7 +1053,16 @@ func (s *Service) resultWithCurrentIssues(ctx context.Context, boardID string, p
 	if message == "" {
 		message = "操作失败。"
 	}
-	return ChangeResult{OK: ok, Message: message, BoardID: boardID, ProjectID: projectID, Revision: revision, Complete: true, Scope: "project", Issues: issues}, nil
+	return s.withProjectIssueStats(ctx, boardID, ChangeResult{OK: ok, Message: message, BoardID: boardID, ProjectID: projectID, Revision: revision, Complete: true, Scope: "project", Issues: issues})
+}
+
+func (s *Service) withProjectIssueStats(ctx context.Context, boardID string, result ChangeResult) (ChangeResult, error) {
+	stats, err := s.repo.ListProjectIssueStats(ctx, boardID)
+	if err != nil {
+		return ChangeResult{}, err
+	}
+	result.ProjectIssueStats = stats
+	return result, nil
 }
 
 func changeError(boardID string, projectID string, revision int64, issues []Issue, message string) ChangeResult {
