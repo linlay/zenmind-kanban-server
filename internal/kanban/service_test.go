@@ -75,6 +75,93 @@ func TestServiceSnapshotMarksCompleteProjectScope(t *testing.T) {
 	}
 }
 
+func TestServiceProjectBindingCreateIsIdempotentAndSanitizesDisplayName(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+
+	localProjectID := "local-alpha"
+	input := kanban.ProjectBindingInput{
+		ProjectID:          kanban.DefaultProjectID,
+		DeviceID:           "device-1",
+		CurrentUserID:      "user-1",
+		LocalProjectID:     localProjectID,
+		LocalDisplayName:   "/Users/jialin/Desktop/local-alpha",
+		SyncPolicy:         "future",
+		ControlMode:        "dispatch",
+		LastRemoteRevision: 7,
+	}
+
+	first, err := service.CreateProjectBinding(context.Background(), input, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.OK || first.Binding == nil {
+		t.Fatalf("expected binding create to succeed, got %#v", first)
+	}
+	if first.Binding.LocalDisplayName != "local-alpha" {
+		t.Fatalf("expected sanitized display name, got %q", first.Binding.LocalDisplayName)
+	}
+	if first.Binding.LocalProjectID != localProjectID {
+		t.Fatalf("expected opaque local project id to be preserved, got %q", first.Binding.LocalProjectID)
+	}
+
+	second, err := service.CreateProjectBinding(context.Background(), input, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.OK || second.Binding == nil {
+		t.Fatalf("expected idempotent binding create to succeed, got %#v", second)
+	}
+	if second.Binding.ID != first.Binding.ID {
+		t.Fatalf("expected duplicate binding create to return existing binding, got %q then %q", first.Binding.ID, second.Binding.ID)
+	}
+
+	list, err := service.ListProjectBindings(context.Background(), kanban.DefaultProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Bindings) != 1 {
+		t.Fatalf("expected one active binding, got %#v", list.Bindings)
+	}
+
+	snapshot, err := service.Snapshot(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.DesktopStatus{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.ProjectBindings) != 1 || snapshot.ProjectBindings[0].ID != first.Binding.ID {
+		t.Fatalf("expected snapshot to include project bindings, got %#v", snapshot.ProjectBindings)
+	}
+}
+
+func TestServiceProjectBindingRejectsInvalidProjectAndDevice(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+
+	result, err := service.CreateProjectBinding(context.Background(), kanban.ProjectBindingInput{
+		ProjectID:      "missing-project",
+		DeviceID:       "device-1",
+		LocalProjectID: "local-alpha",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK {
+		t.Fatalf("expected missing project to be rejected")
+	}
+
+	result, err = service.CreateProjectBinding(context.Background(), kanban.ProjectBindingInput{
+		ProjectID:      kanban.DefaultProjectID,
+		DeviceID:       "   ",
+		LocalProjectID: "local-alpha",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK {
+		t.Fatalf("expected empty device id to be rejected")
+	}
+}
+
 func TestServiceRejectsStaleUpdateRevision(t *testing.T) {
 	service, closeStore := newTestService(t)
 	defer closeStore()
@@ -147,6 +234,60 @@ func TestServiceRejectsStaleDeleteRevision(t *testing.T) {
 	}
 	if result.OK || result.Code != "conflict" {
 		t.Fatalf("expected conflict for stale delete, got %#v", result)
+	}
+}
+
+func TestServiceClaimIssueAssignsCurrentUser(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	issue := createIssue(t, service, "Claim task")
+
+	result, err := service.ClaimIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.ClaimInput{
+		ID:                issue.ID,
+		UserID:            "user-1",
+		Role:              "assignee",
+		BaseIssueRevision: &issue.Revision,
+	}, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Issue == nil {
+		t.Fatalf("expected claim to succeed, got %#v", result)
+	}
+	if result.Issue.AssigneeID == nil || *result.Issue.AssigneeID != "user-1" {
+		t.Fatalf("expected assignee user-1, got %#v", result.Issue.AssigneeID)
+	}
+	if result.Issue.WorkerType == nil || *result.Issue.WorkerType != "human" {
+		t.Fatalf("expected human worker type, got %#v", result.Issue.WorkerType)
+	}
+	if result.Issue.WorkerID == nil || *result.Issue.WorkerID != "user-1" {
+		t.Fatalf("expected worker user-1, got %#v", result.Issue.WorkerID)
+	}
+}
+
+func TestServiceRejectsStaleClaimRevision(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	issue := createIssue(t, service, "Concurrent claim")
+	staleRevision := issue.Revision
+	updatedTitle := "Claimed elsewhere"
+	if result, err := service.UpdateIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, kanban.IssueUpdateInput{
+		Title: &updatedTitle,
+	}, "first"); err != nil || !result.OK {
+		t.Fatalf("expected first update to succeed: %#v, %v", result, err)
+	}
+
+	result, err := service.ClaimIssue(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.ClaimInput{
+		ID:                issue.ID,
+		UserID:            "user-2",
+		Role:              "assignee",
+		BaseIssueRevision: &staleRevision,
+	}, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.Code != "conflict" {
+		t.Fatalf("expected conflict for stale claim, got %#v", result)
 	}
 }
 

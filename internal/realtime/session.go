@@ -123,7 +123,7 @@ func (s *Session) sendSnapshotFor(env Envelope) {
 	}
 	s.projectID = snapshot.ProjectID
 	outType := "event"
-	if env.Op == "kanban.snapshot.get" {
+	if protocolOp(env.Op) == "snapshot.get" {
 		outType = "rpc.res"
 	}
 	s.send <- OutEnvelope{
