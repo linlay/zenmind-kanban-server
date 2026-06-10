@@ -1,6 +1,8 @@
 -- Clean existing demo data
 DELETE FROM issue WHERE PROJECT_ID_ LIKE 'demo-proj-%';
-DELETE FROM project_closure WHERE ANCESTOR_ID_ LIKE 'demo-proj-%';
+DELETE FROM project_closure
+WHERE ANCESTOR_ID_ LIKE 'demo-proj-%'
+	OR DESCENDANT_ID_ LIKE 'demo-proj-%';
 DELETE FROM project WHERE ID_ LIKE 'demo-proj-%';
 
 INSERT INTO project (ID_, PARENT_ID_, SLUG_, KEY_, NAME_, DESCRIPTION_, PATH_, DEPTH_, POSITION_, VISIBILITY_, DEFAULT_WORKFLOW_ID_, CREATED_AT_, UPDATED_AT_)
@@ -379,3 +381,30 @@ ON CONFLICT(ID_) DO NOTHING;
 INSERT INTO project_closure (ANCESTOR_ID_, DESCENDANT_ID_, DEPTH_)
 VALUES ('demo-proj-050', 'demo-proj-050', 0)
 ON CONFLICT(ANCESTOR_ID_, DESCENDANT_ID_) DO NOTHING;
+
+-- Keep demo projects under the default "All Projects" root so the default
+-- board aggregates every seeded issue while issues retain their real project.
+UPDATE project
+SET PARENT_ID_ = 'default'
+WHERE ID_ LIKE 'demo-proj-%'
+	AND PARENT_ID_ IS NULL;
+
+DELETE FROM project_closure
+WHERE ANCESTOR_ID_ LIKE 'demo-proj-%'
+	OR DESCENDANT_ID_ LIKE 'demo-proj-%';
+
+WITH RECURSIVE demo_project_closure(ANCESTOR_ID_, DESCENDANT_ID_, DEPTH_) AS (
+	SELECT ID_, ID_, 0
+	FROM project
+	WHERE ID_ = 'default'
+		OR ID_ LIKE 'demo-proj-%'
+	UNION ALL
+	SELECT demo_project_closure.ANCESTOR_ID_, child.ID_, demo_project_closure.DEPTH_ + 1
+	FROM demo_project_closure
+	JOIN project child ON child.PARENT_ID_ = demo_project_closure.DESCENDANT_ID_
+	WHERE child.ID_ LIKE 'demo-proj-%'
+)
+INSERT OR IGNORE INTO project_closure (ANCESTOR_ID_, DESCENDANT_ID_, DEPTH_)
+SELECT ANCESTOR_ID_, DESCENDANT_ID_, DEPTH_
+FROM demo_project_closure
+WHERE DESCENDANT_ID_ LIKE 'demo-proj-%';
