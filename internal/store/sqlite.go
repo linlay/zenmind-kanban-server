@@ -458,6 +458,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateAddDesktopClientMetadataColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateAddProjectBindingSyncSinceAt(ctx); err != nil {
+		return err
+	}
 	if err := s.rebuildProjectClosure(ctx); err != nil {
 		return err
 	}
@@ -596,6 +599,19 @@ func (s *Store) migrateAddDesktopClientMetadataColumns(ctx context.Context) erro
 		}
 	}
 	return nil
+}
+
+func (s *Store) migrateAddProjectBindingSyncSinceAt(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `ALTER TABLE project_desktop_binding ADD COLUMN SYNC_SINCE_AT_ TEXT`)
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+		return nil
+	}
+	// 老库回填:已有绑定以创建时间作为 future 策略锚点
+	_, err = s.db.ExecContext(ctx, `UPDATE project_desktop_binding SET SYNC_SINCE_AT_ = CREATED_AT_ WHERE SYNC_SINCE_AT_ IS NULL`)
+	return err
 }
 
 func (s *Store) migrateDropLegacyIssueTypeColumn(ctx context.Context) error {
@@ -1592,7 +1608,7 @@ func (s *Store) ListProjectBindings(ctx context.Context, projectID string) ([]ka
 	projectID = strings.TrimSpace(projectID)
 	query := `
 		SELECT ID_, PROJECT_ID_, DEVICE_ID_, CURRENT_USER_ID_, LOCAL_PROJECT_ID_, LOCAL_DISPLAY_NAME_,
-			SYNC_POLICY_, CONTROL_MODE_, STATUS_, LAST_REMOTE_REVISION_, CREATED_BY_, UPDATED_BY_,
+			SYNC_POLICY_, CONTROL_MODE_, STATUS_, LAST_REMOTE_REVISION_, SYNC_SINCE_AT_, CREATED_BY_, UPDATED_BY_,
 			CREATED_AT_, UPDATED_AT_, DELETED_AT_
 		FROM project_desktop_binding
 		WHERE DELETED_AT_ IS NULL
@@ -1643,15 +1659,19 @@ func (s *Store) UpsertProjectBinding(ctx context.Context, binding kanban.Project
 		if binding.ID == "" {
 			binding.ID = createStoreID("pbind")
 		}
+		syncSinceAt := now
+		if binding.SyncSinceAt != nil {
+			syncSinceAt = binding.SyncSinceAt.UTC().Format(time.RFC3339Nano)
+		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO project_desktop_binding (
 				ID_, PROJECT_ID_, DEVICE_ID_, CURRENT_USER_ID_, LOCAL_PROJECT_ID_, LOCAL_DISPLAY_NAME_,
-				SYNC_POLICY_, CONTROL_MODE_, STATUS_, LAST_REMOTE_REVISION_, CREATED_BY_, UPDATED_BY_,
+				SYNC_POLICY_, CONTROL_MODE_, STATUS_, LAST_REMOTE_REVISION_, SYNC_SINCE_AT_, CREATED_BY_, UPDATED_BY_,
 				CREATED_AT_, UPDATED_AT_, DELETED_AT_
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
 		`, binding.ID, binding.ProjectID, binding.DeviceID, binding.CurrentUserID, binding.LocalProjectID,
 			binding.LocalDisplayName, binding.SyncPolicy, binding.ControlMode, binding.Status,
-			binding.LastRemoteRevision, nullIfEmpty(actor), nullIfEmpty(actor), now, now)
+			binding.LastRemoteRevision, syncSinceAt, nullIfEmpty(actor), nullIfEmpty(actor), now, now)
 		if err != nil {
 			return err
 		}
@@ -1669,8 +1689,140 @@ func (s *Store) DeleteProjectBinding(ctx context.Context, id string, actor strin
 			SET DELETED_AT_ = ?, UPDATED_AT_ = ?, UPDATED_BY_ = ?
 			WHERE ID_ = ? AND DELETED_AT_ IS NULL
 		`, now, now, nullIfEmpty(actor), strings.TrimSpace(id))
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `DELETE FROM project_binding_issue WHERE BINDING_ID_ = ?`, strings.TrimSpace(id))
 		return err
 	})
+}
+
+func (s *Store) ProjectBindingByID(ctx context.Context, id string) (kanban.ProjectBinding, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT ID_, PROJECT_ID_, DEVICE_ID_, CURRENT_USER_ID_, LOCAL_PROJECT_ID_, LOCAL_DISPLAY_NAME_,
+			SYNC_POLICY_, CONTROL_MODE_, STATUS_, LAST_REMOTE_REVISION_, SYNC_SINCE_AT_, CREATED_BY_, UPDATED_BY_,
+			CREATED_AT_, UPDATED_AT_, DELETED_AT_
+		FROM project_desktop_binding
+		WHERE ID_ = ? AND DELETED_AT_ IS NULL
+	`, strings.TrimSpace(id))
+	return scanProjectBinding(row)
+}
+
+func (s *Store) UpdateProjectBinding(ctx context.Context, id string, input kanban.ProjectBindingUpdateInput, actor string) (kanban.ProjectBinding, int64, error) {
+	var stored kanban.ProjectBinding
+	revision, err := s.withRevision(ctx, kanban.DefaultBoardID, "kanban.projectBinding.updated", "", "", actor, input, func(tx *sql.Tx, revision int64) error {
+		existing, err := projectBindingByIDTx(ctx, tx, strings.TrimSpace(id))
+		if err != nil {
+			return err
+		}
+		if input.SyncPolicy != nil {
+			existing.SyncPolicy = strings.TrimSpace(*input.SyncPolicy)
+		}
+		if input.ControlMode != nil {
+			existing.ControlMode = strings.TrimSpace(*input.ControlMode)
+		}
+		if input.Status != nil {
+			existing.Status = strings.TrimSpace(*input.Status)
+		}
+		if input.LocalDisplayName != nil {
+			existing.LocalDisplayName = strings.TrimSpace(*input.LocalDisplayName)
+		}
+		now := nowText()
+		if _, err = tx.ExecContext(ctx, `
+			UPDATE project_desktop_binding
+			SET SYNC_POLICY_ = ?, CONTROL_MODE_ = ?, STATUS_ = ?, LOCAL_DISPLAY_NAME_ = ?, UPDATED_BY_ = ?, UPDATED_AT_ = ?
+			WHERE ID_ = ? AND DELETED_AT_ IS NULL
+		`, existing.SyncPolicy, existing.ControlMode, existing.Status, existing.LocalDisplayName,
+			nullIfEmpty(actor), now, existing.ID); err != nil {
+			return err
+		}
+		stored, err = projectBindingByIDTx(ctx, tx, existing.ID)
+		return err
+	})
+	return stored, revision, err
+}
+
+func (s *Store) ListProjectBindingIssues(ctx context.Context) ([]kanban.ProjectBindingIssue, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT BINDING_ID_, ISSUE_ID_, SOURCE_, CREATED_AT_
+		FROM project_binding_issue
+		ORDER BY BINDING_ID_ ASC, CREATED_AT_ ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []kanban.ProjectBindingIssue{}
+	for rows.Next() {
+		var item kanban.ProjectBindingIssue
+		var createdAt string
+		if err := rows.Scan(&item.BindingID, &item.IssueID, &item.Source, &createdAt); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, err = parseTime(createdAt)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) SetProjectBindingIssues(ctx context.Context, bindingID string, issueIDs []string, actor string) (int64, error) {
+	bindingID = strings.TrimSpace(bindingID)
+	payload := map[string]any{"bindingId": bindingID, "issueIds": issueIDs}
+	return s.withRevision(ctx, kanban.DefaultBoardID, "kanban.projectBinding.issues.set", "", "", actor, payload, func(tx *sql.Tx, revision int64) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM project_binding_issue WHERE BINDING_ID_ = ? AND SOURCE_ = 'select'`, bindingID); err != nil {
+			return err
+		}
+		now := nowText()
+		for _, issueID := range issueIDs {
+			issueID = strings.TrimSpace(issueID)
+			if issueID == "" {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO project_binding_issue (BINDING_ID_, ISSUE_ID_, SOURCE_, CREATED_AT_)
+				VALUES (?, ?, 'select', ?)
+				ON CONFLICT(BINDING_ID_, ISSUE_ID_) DO NOTHING
+			`, bindingID, issueID, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// AddProjectBindingIssue 把 issue 钉进绑定(派发/桌面上行时调用),不递增 board revision。
+func (s *Store) AddProjectBindingIssue(ctx context.Context, bindingID string, issueID string, source string) error {
+	bindingID = strings.TrimSpace(bindingID)
+	issueID = strings.TrimSpace(issueID)
+	if bindingID == "" || issueID == "" {
+		return nil
+	}
+	source = strings.TrimSpace(source)
+	if source != "select" && source != "dispatch" && source != "desktop_sync" {
+		source = "select"
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO project_binding_issue (BINDING_ID_, ISSUE_ID_, SOURCE_, CREATED_AT_)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(BINDING_ID_, ISSUE_ID_) DO NOTHING
+	`, bindingID, issueID, source, nowText())
+	return err
+}
+
+func (s *Store) UpdateDesktopClientSelectedProject(ctx context.Context, sessionID string, selectedProjectID string) error {
+	if selectedProjectID == "" {
+		selectedProjectID = kanban.DefaultProjectID
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE desktop_client
+		SET SELECTED_PROJECT_ID_ = ?, LAST_SEEN_AT_ = ?
+		WHERE SESSION_ID_ = ?
+	`, selectedProjectID, now, sessionID)
+	return err
 }
 
 func (s *Store) CreateProject(ctx context.Context, project kanban.Project, actor string) (int64, error) {
@@ -2008,7 +2160,7 @@ func descendantProjectsTx(ctx context.Context, tx *sql.Tx, projectID string) ([]
 func projectBindingByIDTx(ctx context.Context, tx *sql.Tx, id string) (kanban.ProjectBinding, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT ID_, PROJECT_ID_, DEVICE_ID_, CURRENT_USER_ID_, LOCAL_PROJECT_ID_, LOCAL_DISPLAY_NAME_,
-			SYNC_POLICY_, CONTROL_MODE_, STATUS_, LAST_REMOTE_REVISION_, CREATED_BY_, UPDATED_BY_,
+			SYNC_POLICY_, CONTROL_MODE_, STATUS_, LAST_REMOTE_REVISION_, SYNC_SINCE_AT_, CREATED_BY_, UPDATED_BY_,
 			CREATED_AT_, UPDATED_AT_, DELETED_AT_
 		FROM project_desktop_binding
 		WHERE ID_ = ? AND DELETED_AT_ IS NULL
@@ -2019,7 +2171,7 @@ func projectBindingByIDTx(ctx context.Context, tx *sql.Tx, id string) (kanban.Pr
 func projectBindingByIdentityTx(ctx context.Context, tx *sql.Tx, projectID string, deviceID string, localProjectID string) (kanban.ProjectBinding, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT ID_, PROJECT_ID_, DEVICE_ID_, CURRENT_USER_ID_, LOCAL_PROJECT_ID_, LOCAL_DISPLAY_NAME_,
-			SYNC_POLICY_, CONTROL_MODE_, STATUS_, LAST_REMOTE_REVISION_, CREATED_BY_, UPDATED_BY_,
+			SYNC_POLICY_, CONTROL_MODE_, STATUS_, LAST_REMOTE_REVISION_, SYNC_SINCE_AT_, CREATED_BY_, UPDATED_BY_,
 			CREATED_AT_, UPDATED_AT_, DELETED_AT_
 		FROM project_desktop_binding
 		WHERE PROJECT_ID_ = ? AND DEVICE_ID_ = ? AND LOCAL_PROJECT_ID_ = ? AND DELETED_AT_ IS NULL
@@ -2029,7 +2181,7 @@ func projectBindingByIdentityTx(ctx context.Context, tx *sql.Tx, projectID strin
 
 func scanProjectBinding(scanner issueScanner) (kanban.ProjectBinding, error) {
 	var binding kanban.ProjectBinding
-	var currentUserID, createdBy, updatedBy, deletedAt sql.NullString
+	var currentUserID, syncSinceAt, createdBy, updatedBy, deletedAt sql.NullString
 	var createdAt, updatedAt string
 	err := scanner.Scan(
 		&binding.ID,
@@ -2042,6 +2194,7 @@ func scanProjectBinding(scanner issueScanner) (kanban.ProjectBinding, error) {
 		&binding.ControlMode,
 		&binding.Status,
 		&binding.LastRemoteRevision,
+		&syncSinceAt,
 		&createdBy,
 		&updatedBy,
 		&createdAt,
@@ -2056,6 +2209,10 @@ func scanProjectBinding(scanner issueScanner) (kanban.ProjectBinding, error) {
 	}
 	binding.CreatedBy = stringPtr(createdBy)
 	binding.UpdatedBy = stringPtr(updatedBy)
+	binding.SyncSinceAt, err = parseOptionalTime(syncSinceAt)
+	if err != nil {
+		return binding, err
+	}
 	parsedCreatedAt, err := time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {
 		return binding, err

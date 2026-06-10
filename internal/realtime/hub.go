@@ -285,6 +285,23 @@ func (h *Hub) handle(session *Session, env Envelope) {
 		}
 		result, err := h.service.DeleteProjectBinding(context.Background(), payload.ID, session.actorID())
 		h.respondProjectBinding(session, env, result, err, true)
+	case "projectBinding.update":
+		var payload struct {
+			ID    string                           `json:"id"`
+			Input kanban.ProjectBindingUpdateInput `json:"input"`
+		}
+		if !decodeOrRespond(session, env, &payload) {
+			return
+		}
+		result, err := h.service.UpdateProjectBinding(context.Background(), payload.ID, payload.Input, session.actorID())
+		h.respondProjectBinding(session, env, result, err, true)
+	case "projectBinding.issues.set":
+		var input kanban.ProjectBindingIssuesSetInput
+		if !decodeOrRespond(session, env, &input) {
+			return
+		}
+		result, err := h.service.SetProjectBindingIssues(context.Background(), input, session.actorID())
+		h.respondProjectBinding(session, env, result, err, true)
 	case "user.create":
 		var input kanban.UserInput
 		if !decodeOrRespond(session, env, &input) {
@@ -564,11 +581,15 @@ func (h *Hub) handle(session *Session, env Envelope) {
 	case "desktop.project.listLocal":
 		h.forwardDesktop(session, env, "desktop.project.listLocal")
 	case "desktop.project.createLocal":
-		h.forwardDesktop(session, env, "desktop.project.createLocal")
+		h.desktopProjectCreateLocal(session, env)
 	case "desktop.project.bind":
-		h.forwardDesktop(session, env, "desktop.project.bind")
+		h.desktopProjectBind(session, env)
 	case "desktop.project.unbind":
-		h.forwardDesktop(session, env, "desktop.project.unbind")
+		h.desktopProjectUnbind(session, env)
+	case "desktop.project.select":
+		h.desktopProjectSelect(session, env)
+	case "desktop.issue.sync":
+		h.desktopIssueSync(session, env)
 	case "workflow.create":
 		var input kanban.WorkflowInput
 		if !decodeOrRespond(session, env, &input) {
@@ -612,6 +633,7 @@ func (h *Hub) snapshotForSession(session *Session, boardID string, projectID str
 		return kanban.ListResult{}, err
 	}
 	h.applyDesktopSnapshotScope(session, &snapshot)
+	h.applyDesktopBindingScope(session, &snapshot)
 	return snapshot, nil
 }
 
@@ -782,6 +804,10 @@ func protocolOp(op string) string {
 		return "projectBinding.create"
 	case "kanban.projectBinding.delete":
 		return "projectBinding.delete"
+	case "kanban.projectBinding.update":
+		return "projectBinding.update"
+	case "kanban.projectBinding.issues.set":
+		return "projectBinding.issues.set"
 	case "kanban.desktop.project.listLocal":
 		return "desktop.project.listLocal"
 	case "kanban.desktop.project.createLocal":
@@ -900,11 +926,20 @@ func (h *Hub) assignAndRun(session *Session, env Envelope) {
 	if agentKey == nil {
 		agentKey = issue.AssigneeAgentKey
 	}
+	input.TargetDesktopSessionID = h.resolveDispatchTarget(env.ProjectID, input.TargetDesktopSessionID)
+	binding, denyReason := h.resolveDispatchBinding(env.ProjectID, input.TargetDesktopSessionID)
+	if denyReason != "" {
+		session.respond(env, kanban.ChangeResult{OK: false, Code: "binding_forbidden", Message: denyReason, BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issue: issue, Issues: kanban.SortIssues(snapshot.Issues), ProjectIssueStats: snapshot.ProjectIssueStats})
+		return
+	}
 	resultPayload, err := h.runIdempotent(input.IdempotencyKey, func() (any, error) {
 		payload := map[string]any{
 			"issue":    issue,
 			"agentKey": agentKey,
 			"message":  buildAssistantPrompt(*issue),
+		}
+		if bindingContext := dispatchBindingContext(binding); bindingContext != nil {
+			payload["binding"] = bindingContext
 		}
 		response, err := h.requestDesktop("desktop.assistant.startRun", env.BoardID, env.ProjectID, input.TargetDesktopSessionID, payload)
 		if err != nil {
@@ -918,6 +953,7 @@ func (h *Hub) assignAndRun(session *Session, env Envelope) {
 		if err != nil {
 			return nil, err
 		}
+		h.pinDispatchedIssue(binding, input.ID)
 		return change, nil
 	})
 	if err != nil {
@@ -969,13 +1005,31 @@ func (h *Hub) dispatchToDesktop(session *Session, env Envelope) {
 			return
 		}
 	}
-	resultPayload, err := h.runIdempotent(payload.IdempotencyKey, func() (any, error) {
-		response, err := h.requestDesktop("desktop.kanban.issue.dispatch", env.BoardID, env.ProjectID, payload.TargetDesktopSessionID, map[string]any{
-			"issue": issue,
+	payload.TargetDesktopSessionID = h.resolveDispatchTarget(env.ProjectID, payload.TargetDesktopSessionID)
+	binding, denyReason := h.resolveDispatchBinding(env.ProjectID, payload.TargetDesktopSessionID)
+	if denyReason != "" {
+		session.respond(env, map[string]any{
+			"ok":        false,
+			"code":      "binding_forbidden",
+			"message":   denyReason,
+			"issue":     issue,
+			"boardId":   env.BoardID,
+			"projectId": env.ProjectID,
 		})
+		return
+	}
+	resultPayload, err := h.runIdempotent(payload.IdempotencyKey, func() (any, error) {
+		dispatchPayload := map[string]any{
+			"issue": issue,
+		}
+		if bindingContext := dispatchBindingContext(binding); bindingContext != nil {
+			dispatchPayload["binding"] = bindingContext
+		}
+		response, err := h.requestDesktop("desktop.kanban.issue.dispatch", env.BoardID, env.ProjectID, payload.TargetDesktopSessionID, dispatchPayload)
 		if err != nil {
 			return nil, err
 		}
+		h.pinDispatchedIssue(binding, issue.ID)
 		return map[string]any{
 			"ok":        true,
 			"message":   "任务已派发到 Desktop。",

@@ -288,38 +288,39 @@ type DesktopOnlineListResult struct {
 }
 
 type ListResult struct {
-	OK                  bool                 `json:"ok"`
-	Message             string               `json:"message"`
-	BoardID             string               `json:"boardId"`
-	ProjectID           string               `json:"projectId"`
-	Revision            int64                `json:"revision"`
-	Complete            bool                 `json:"complete"`
-	Scope               string               `json:"scope"`
-	Projects            []Project            `json:"projects"`
-	Issues              []Issue              `json:"issues"`
-	ProjectIssueStats   []ProjectIssueStat   `json:"projectIssueStats"`
-	Users               []UserAccount        `json:"users"`
-	Workflows           []Workflow           `json:"workflows"`
-	WorkflowStageDefs   []WorkflowStageDef   `json:"workflowStageDefs"`
-	WorkflowStatusDefs  []WorkflowStatusDef  `json:"workflowStatusDefs"`
-	WorkflowStages      []WorkflowStage      `json:"workflowStages"`
-	WorkflowStatuses    []WorkflowStatus     `json:"workflowStatuses"`
-	WorkflowTransitions []WorkflowTransition `json:"workflowTransitions"`
-	Teams               []Team               `json:"teams"`
-	TeamMembers         []TeamMember         `json:"teamMembers"`
-	ProjectPermissions  []ProjectPermission  `json:"projectPermissions"`
-	ProjectBindings     []ProjectBinding     `json:"projectBindings"`
-	IssueLabels         []IssueLabel         `json:"issueLabels"`
-	IssueLabelLinks     []IssueLabelLink     `json:"issueLabelLinks"`
-	IssueDependencies   []IssueDependency    `json:"issueDependencies"`
-	Reviews             []Review             `json:"reviews"`
-	ReviewComments      []ReviewComment      `json:"reviewComments"`
-	Agents              []Agent              `json:"agents"`
-	AgentRuns           []AgentRun           `json:"agentRuns"`
-	AgentToolCalls      []AgentToolCall      `json:"agentToolCalls"`
-	RecentEvents        []EventLogItem       `json:"recentEvents"`
-	DesktopStatus       DesktopStatus        `json:"desktopStatus"`
-	StoragePath         string               `json:"storagePath,omitempty"`
+	OK                   bool                  `json:"ok"`
+	Message              string                `json:"message"`
+	BoardID              string                `json:"boardId"`
+	ProjectID            string                `json:"projectId"`
+	Revision             int64                 `json:"revision"`
+	Complete             bool                  `json:"complete"`
+	Scope                string                `json:"scope"`
+	Projects             []Project             `json:"projects"`
+	Issues               []Issue               `json:"issues"`
+	ProjectIssueStats    []ProjectIssueStat    `json:"projectIssueStats"`
+	Users                []UserAccount         `json:"users"`
+	Workflows            []Workflow            `json:"workflows"`
+	WorkflowStageDefs    []WorkflowStageDef    `json:"workflowStageDefs"`
+	WorkflowStatusDefs   []WorkflowStatusDef   `json:"workflowStatusDefs"`
+	WorkflowStages       []WorkflowStage       `json:"workflowStages"`
+	WorkflowStatuses     []WorkflowStatus      `json:"workflowStatuses"`
+	WorkflowTransitions  []WorkflowTransition  `json:"workflowTransitions"`
+	Teams                []Team                `json:"teams"`
+	TeamMembers          []TeamMember          `json:"teamMembers"`
+	ProjectPermissions   []ProjectPermission   `json:"projectPermissions"`
+	ProjectBindings      []ProjectBinding      `json:"projectBindings"`
+	ProjectBindingIssues []ProjectBindingIssue `json:"projectBindingIssues,omitempty"`
+	IssueLabels          []IssueLabel          `json:"issueLabels"`
+	IssueLabelLinks      []IssueLabelLink      `json:"issueLabelLinks"`
+	IssueDependencies    []IssueDependency     `json:"issueDependencies"`
+	Reviews              []Review              `json:"reviews"`
+	ReviewComments       []ReviewComment       `json:"reviewComments"`
+	Agents               []Agent               `json:"agents"`
+	AgentRuns            []AgentRun            `json:"agentRuns"`
+	AgentToolCalls       []AgentToolCall       `json:"agentToolCalls"`
+	RecentEvents         []EventLogItem        `json:"recentEvents"`
+	DesktopStatus        DesktopStatus         `json:"desktopStatus"`
+	StoragePath          string                `json:"storagePath,omitempty"`
 }
 
 type IssuesResult struct {
@@ -368,6 +369,7 @@ type ProjectBinding struct {
 	ControlMode        string     `json:"controlMode"`
 	Status             string     `json:"status"`
 	LastRemoteRevision int64      `json:"lastRemoteRevision"`
+	SyncSinceAt        *time.Time `json:"syncSinceAt,omitempty"`
 	CreatedAt          time.Time  `json:"createdAt"`
 	UpdatedAt          time.Time  `json:"updatedAt"`
 	DeletedAt          *time.Time `json:"deletedAt,omitempty"`
@@ -393,6 +395,80 @@ type ProjectBindingResult struct {
 	Revision int64            `json:"revision,omitempty"`
 	Binding  *ProjectBinding  `json:"binding,omitempty"`
 	Bindings []ProjectBinding `json:"bindings,omitempty"`
+}
+
+type ProjectBindingUpdateInput struct {
+	SyncPolicy       *string `json:"syncPolicy,omitempty"`
+	ControlMode      *string `json:"controlMode,omitempty"`
+	Status           *string `json:"status,omitempty"`
+	LocalDisplayName *string `json:"localDisplayName,omitempty"`
+}
+
+type ProjectBindingIssue struct {
+	BindingID string    `json:"bindingId"`
+	IssueID   string    `json:"issueId"`
+	Source    string    `json:"source"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type ProjectBindingIssuesSetInput struct {
+	BindingID string   `json:"bindingId"`
+	IssueIDs  []string `json:"issueIds"`
+}
+
+type DesktopIssueSyncUpsert struct {
+	LocalIssueID      string     `json:"localIssueId"`
+	RemoteIssueID     string     `json:"remoteIssueId,omitempty"`
+	BaseIssueRevision int64      `json:"baseIssueRevision,omitempty"`
+	Input             IssueInput `json:"input"`
+}
+
+type DesktopIssueSyncDelete struct {
+	LocalIssueID      string `json:"localIssueId"`
+	RemoteIssueID     string `json:"remoteIssueId"`
+	BaseIssueRevision int64  `json:"baseIssueRevision,omitempty"`
+}
+
+type DesktopIssueSyncInput struct {
+	DeviceID       string                   `json:"deviceId"`
+	ProjectID      string                   `json:"projectId"`
+	LocalProjectID string                   `json:"localProjectId"`
+	BaseRevision   int64                    `json:"baseRevision,omitempty"`
+	Upserts        []DesktopIssueSyncUpsert `json:"upserts,omitempty"`
+	Deletes        []DesktopIssueSyncDelete `json:"deletes,omitempty"`
+}
+
+type DesktopIssueSyncItemResult struct {
+	LocalIssueID  string `json:"localIssueId"`
+	RemoteIssueID string `json:"remoteIssueId,omitempty"`
+	Status        string `json:"status"`
+	Issue         *Issue `json:"issue,omitempty"`
+	Message       string `json:"message,omitempty"`
+}
+
+type DesktopIssueSyncResult struct {
+	OK        bool                         `json:"ok"`
+	Message   string                       `json:"message,omitempty"`
+	BoardID   string                       `json:"boardId"`
+	ProjectID string                       `json:"projectId"`
+	Revision  int64                        `json:"revision"`
+	Results   []DesktopIssueSyncItemResult `json:"results"`
+}
+
+type DesktopCreateLocalProjectInput struct {
+	TargetDesktopSessionID string `json:"targetDesktopSessionId,omitempty"`
+	ProjectID              string `json:"projectId"`
+	Name                   string `json:"name"`
+	LocalProjectID         string `json:"localProjectId,omitempty"`
+	SyncPolicy             string `json:"syncPolicy,omitempty"`
+	ControlMode            string `json:"controlMode,omitempty"`
+}
+
+type DesktopLocalProject struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug,omitempty"`
+	Path string `json:"path,omitempty"`
 }
 
 type AgentOption struct {

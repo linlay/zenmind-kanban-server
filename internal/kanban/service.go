@@ -44,7 +44,12 @@ type Repository interface {
 	UpdateProject(ctx context.Context, projectID string, input ProjectUpdateInput, actor string) (int64, error)
 	MoveProject(ctx context.Context, input ProjectMoveInput, actor string) (int64, error)
 	UpsertProjectBinding(ctx context.Context, binding ProjectBinding, actor string) (ProjectBinding, int64, error)
+	UpdateProjectBinding(ctx context.Context, id string, input ProjectBindingUpdateInput, actor string) (ProjectBinding, int64, error)
 	DeleteProjectBinding(ctx context.Context, id string, actor string) (int64, error)
+	ProjectBindingByID(ctx context.Context, id string) (ProjectBinding, error)
+	ListProjectBindingIssues(ctx context.Context) ([]ProjectBindingIssue, error)
+	SetProjectBindingIssues(ctx context.Context, bindingID string, issueIDs []string, actor string) (int64, error)
+	AddProjectBindingIssue(ctx context.Context, bindingID string, issueID string, source string) error
 	CreateUser(ctx context.Context, input UserInput, actor string) (int64, error)
 	UpdateUser(ctx context.Context, id string, input UserUpdateInput, actor string) (int64, error)
 	DeleteUser(ctx context.Context, id string, actor string) (int64, error)
@@ -198,6 +203,10 @@ func (s *Service) Snapshot(ctx context.Context, boardID string, projectID string
 	if err != nil {
 		return ListResult{}, err
 	}
+	projectBindingIssues, err := s.repo.ListProjectBindingIssues(ctx)
+	if err != nil {
+		return ListResult{}, err
+	}
 	projectIDs := snapshotProjectIDs(projects, projectID)
 	issueIDs := snapshotIssueIDs(issues)
 	issueLabels, err := s.repo.ListIssueLabelsForProjects(ctx, projectIDs)
@@ -233,38 +242,39 @@ func (s *Service) Snapshot(ctx context.Context, boardID string, projectID string
 		return ListResult{}, err
 	}
 	return ListResult{
-		OK:                  true,
-		Message:             "issue 看板已加载。",
-		BoardID:             boardID,
-		ProjectID:           projectID,
-		Revision:            revision,
-		Complete:            true,
-		Scope:               "project",
-		Projects:            projects,
-		Issues:              issues,
-		ProjectIssueStats:   projectIssueStats,
-		Users:               users,
-		Workflows:           catalog.Workflows,
-		WorkflowStageDefs:   catalog.WorkflowStageDefs,
-		WorkflowStatusDefs:  catalog.WorkflowStatusDefs,
-		WorkflowStages:      catalog.WorkflowStages,
-		WorkflowStatuses:    catalog.WorkflowStatuses,
-		WorkflowTransitions: catalog.WorkflowTransitions,
-		Teams:               catalog.Teams,
-		TeamMembers:         teamMembers,
-		ProjectPermissions:  catalog.ProjectPermissions,
-		ProjectBindings:     projectBindings,
-		IssueLabels:         issueLabels,
-		IssueLabelLinks:     issueLabelLinks,
-		IssueDependencies:   issueDependencies,
-		Reviews:             reviews,
-		ReviewComments:      reviewComments,
-		Agents:              agents,
-		AgentRuns:           agentRuns,
-		AgentToolCalls:      agentToolCalls,
-		RecentEvents:        recentEvents,
-		DesktopStatus:       desktopStatus,
-		StoragePath:         s.repo.Path(),
+		OK:                   true,
+		Message:              "issue 看板已加载。",
+		BoardID:              boardID,
+		ProjectID:            projectID,
+		Revision:             revision,
+		Complete:             true,
+		Scope:                "project",
+		Projects:             projects,
+		Issues:               issues,
+		ProjectIssueStats:    projectIssueStats,
+		Users:                users,
+		Workflows:            catalog.Workflows,
+		WorkflowStageDefs:    catalog.WorkflowStageDefs,
+		WorkflowStatusDefs:   catalog.WorkflowStatusDefs,
+		WorkflowStages:       catalog.WorkflowStages,
+		WorkflowStatuses:     catalog.WorkflowStatuses,
+		WorkflowTransitions:  catalog.WorkflowTransitions,
+		Teams:                catalog.Teams,
+		TeamMembers:          teamMembers,
+		ProjectPermissions:   catalog.ProjectPermissions,
+		ProjectBindings:      projectBindings,
+		ProjectBindingIssues: projectBindingIssues,
+		IssueLabels:          issueLabels,
+		IssueLabelLinks:      issueLabelLinks,
+		IssueDependencies:    issueDependencies,
+		Reviews:              reviews,
+		ReviewComments:       reviewComments,
+		Agents:               agents,
+		AgentRuns:            agentRuns,
+		AgentToolCalls:       agentToolCalls,
+		RecentEvents:         recentEvents,
+		DesktopStatus:        desktopStatus,
+		StoragePath:          s.repo.Path(),
 	}, nil
 }
 
@@ -1228,6 +1238,83 @@ func (s *Service) DeleteProjectBinding(ctx context.Context, id string, actor str
 		Message:  "项目本地联动已解除。",
 		Revision: revision,
 	}, nil
+}
+
+func (s *Service) UpdateProjectBinding(ctx context.Context, id string, input ProjectBindingUpdateInput, actor string) (ProjectBindingResult, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return projectBindingError("缺少绑定 ID。"), nil
+	}
+	if _, err := s.repo.ProjectBindingByID(ctx, id); err != nil {
+		return projectBindingError("绑定不存在。"), nil
+	}
+	if input.SyncPolicy != nil {
+		normalized := normalizeProjectBindingSyncPolicy(*input.SyncPolicy)
+		input.SyncPolicy = &normalized
+	}
+	if input.ControlMode != nil {
+		normalized := normalizeProjectBindingControlMode(*input.ControlMode)
+		input.ControlMode = &normalized
+	}
+	if input.Status != nil {
+		normalized := normalizeProjectBindingStatus(*input.Status)
+		input.Status = &normalized
+	}
+	stored, revision, err := s.repo.UpdateProjectBinding(ctx, id, input, actor)
+	if err != nil {
+		return ProjectBindingResult{}, err
+	}
+	return ProjectBindingResult{
+		OK:       true,
+		Message:  "项目本地联动已更新。",
+		Revision: revision,
+		Binding:  &stored,
+		Bindings: []ProjectBinding{stored},
+	}, nil
+}
+
+func (s *Service) SetProjectBindingIssues(ctx context.Context, input ProjectBindingIssuesSetInput, actor string) (ProjectBindingResult, error) {
+	bindingID := strings.TrimSpace(input.BindingID)
+	if bindingID == "" {
+		return projectBindingError("缺少绑定 ID。"), nil
+	}
+	binding, err := s.repo.ProjectBindingByID(ctx, bindingID)
+	if err != nil {
+		return projectBindingError("绑定不存在。"), nil
+	}
+	revision, err := s.repo.SetProjectBindingIssues(ctx, bindingID, input.IssueIDs, actor)
+	if err != nil {
+		return ProjectBindingResult{}, err
+	}
+	return ProjectBindingResult{
+		OK:       true,
+		Message:  "同步任务清单已更新。",
+		Revision: revision,
+		Binding:  &binding,
+	}, nil
+}
+
+// FindProjectBindingForDevice 查找某云端项目与某设备之间的活动绑定(派发校验与快照过滤共用)。
+func (s *Service) FindProjectBindingForDevice(ctx context.Context, projectID string, deviceID string) (*ProjectBinding, error) {
+	projectID = strings.TrimSpace(projectID)
+	deviceID = strings.TrimSpace(deviceID)
+	if projectID == "" || deviceID == "" {
+		return nil, nil
+	}
+	bindings, err := s.repo.ListProjectBindings(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range bindings {
+		if bindings[i].DeviceID == deviceID {
+			return &bindings[i], nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *Service) PinProjectBindingIssue(ctx context.Context, bindingID string, issueID string, source string) error {
+	return s.repo.AddProjectBindingIssue(ctx, bindingID, issueID, source)
 }
 
 func (s *Service) resultWithCurrentIssues(ctx context.Context, boardID string, projectID string, ok bool, message string) (ChangeResult, error) {
