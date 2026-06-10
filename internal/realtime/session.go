@@ -19,6 +19,7 @@ type Session struct {
 	currentUser  DesktopCurrentUser
 	scope        string
 	capabilities []string
+	agents       []kanban.DesktopAgentOption
 	lastSeenAt   time.Time
 	conn         *websocket.Conn
 	hub          *Hub

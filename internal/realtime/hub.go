@@ -115,6 +115,25 @@ func (h *Hub) register(session *Session) {
 	}
 }
 
+func (h *Hub) unregisterDuplicateDesktopSessions(current *Session) {
+	deviceID := strings.TrimSpace(current.deviceID)
+	if current.role != "desktop" || deviceID == "" {
+		return
+	}
+	h.mu.RLock()
+	duplicates := make([]*Session, 0)
+	for id, session := range h.desktopSessions {
+		if id == current.id || strings.TrimSpace(session.deviceID) != deviceID {
+			continue
+		}
+		duplicates = append(duplicates, session)
+	}
+	h.mu.RUnlock()
+	for _, session := range duplicates {
+		h.unregister(session)
+	}
+}
+
 func (h *Hub) unregister(session *Session) {
 	h.mu.Lock()
 	if _, ok := h.sessions[session.id]; !ok {
@@ -666,6 +685,13 @@ func ptrMatches(value *string, expected string) bool {
 	return value != nil && strings.TrimSpace(*value) == expected
 }
 
+func ptrStringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
 func filterSlice[T any](items []T, keep func(T) bool) []T {
 	filtered := make([]T, 0, len(items))
 	for _, item := range items {
@@ -997,17 +1023,19 @@ func (h *Hub) forwardDesktop(session *Session, env Envelope, op string) {
 func (h *Hub) desktopHello(session *Session, env Envelope) {
 	session.role = "desktop"
 	var payload struct {
-		Capabilities      []string           `json:"capabilities"`
-		SelectedProjectID string             `json:"selectedProjectId"`
-		CurrentUser       DesktopCurrentUser `json:"currentUser"`
-		Scope             string             `json:"scope"`
-		DeviceID          string             `json:"deviceId"`
+		Capabilities      []string                    `json:"capabilities"`
+		SelectedProjectID string                      `json:"selectedProjectId"`
+		CurrentUser       DesktopCurrentUser          `json:"currentUser"`
+		Scope             string                      `json:"scope"`
+		DeviceID          string                      `json:"deviceId"`
+		Agents            []kanban.DesktopAgentOption `json:"agents"`
 	}
 	_ = json.Unmarshal(env.Payload, &payload)
 	session.capabilities = payload.Capabilities
 	session.currentUser = payload.CurrentUser
 	session.deviceID = strings.TrimSpace(payload.DeviceID)
 	session.scope = strings.TrimSpace(payload.Scope)
+	session.agents = normalizeDesktopAgents(payload.Agents)
 	session.lastSeenAt = time.Now().UTC()
 	if strings.TrimSpace(payload.SelectedProjectID) != "" {
 		session.projectID = strings.TrimSpace(payload.SelectedProjectID)
@@ -1015,6 +1043,7 @@ func (h *Hub) desktopHello(session *Session, env Envelope) {
 	h.mu.Lock()
 	h.desktopSessions[session.id] = session
 	h.mu.Unlock()
+	h.unregisterDuplicateDesktopSessions(session)
 	if err := h.store.SaveDesktopClient(context.Background(), session.id, session.deviceID, session.currentUser.ID, session.currentUser.Name, payload.Capabilities, session.projectID); err != nil {
 		h.logger.Warn("failed to save desktop client", "error", err)
 	}
@@ -1037,6 +1066,14 @@ func (h *Hub) desktopAssistantEvent(session *Session, env Envelope) {
 	if !decodeOrRespond(session, env, &event) {
 		return
 	}
+	h.logger.Info("desktop assistant event",
+		"type", event.Type,
+		"status", ptrStringValue(event.Status),
+		"runId", ptrStringValue(event.RunID),
+		"chatId", ptrStringValue(event.ChatID),
+		"message", ptrStringValue(event.Message),
+		"error", event.Error,
+	)
 	result, err := h.service.SyncAssistantEvent(context.Background(), env.BoardID, env.ProjectID, event, "desktop")
 	h.respondChange(session, env, result, err, "kanban.issue.updated")
 }
@@ -1045,6 +1082,10 @@ func (h *Hub) desktopOnlineList(session *Session, env Envelope) {
 	status := h.DesktopStatus()
 	agentResults := make(map[string]desktopAgentLoadResult, len(status.Sessions))
 	for _, desktopSession := range status.Sessions {
+		if len(desktopSession.Agents) > 0 {
+			agentResults[desktopSession.SessionID] = desktopAgentLoadResult{agents: desktopSession.Agents}
+			continue
+		}
 		response, err := h.requestDesktop("desktop.assistant.listAgents", env.BoardID, env.ProjectID, desktopSession.SessionID, map[string]any{})
 		if err != nil {
 			agentResults[desktopSession.SessionID] = desktopAgentLoadResult{err: err}
@@ -1110,8 +1151,10 @@ func (h *Hub) completePending(env Envelope) {
 	ch := h.pending[env.ID]
 	h.mu.RUnlock()
 	if ch == nil {
+		h.logger.Info("desktop response without pending request", "op", env.Op, "id", env.ID)
 		return
 	}
+	h.logger.Info("desktop response completed pending request", "op", env.Op, "id", env.ID)
 	select {
 	case ch <- env:
 	default:
@@ -1215,6 +1258,7 @@ func (h *Hub) DesktopStatus() kanban.DesktopStatus {
 			CurrentUserName:   strings.TrimSpace(session.currentUser.Name),
 			SelectedProjectID: session.projectID,
 			Capabilities:      append([]string(nil), session.capabilities...),
+			Agents:            append([]kanban.DesktopAgentOption(nil), session.agents...),
 			LastSeenAt:        lastSeenAt,
 		})
 	}
@@ -1226,6 +1270,25 @@ func (h *Hub) DesktopStatus() kanban.DesktopStatus {
 		status.SelectedProjectID = first.SelectedProjectID
 	}
 	return status
+}
+
+func normalizeDesktopAgents(agents []kanban.DesktopAgentOption) []kanban.DesktopAgentOption {
+	result := make([]kanban.DesktopAgentOption, 0, len(agents))
+	seen := map[string]bool{}
+	for _, agent := range agents {
+		agent.AgentKey = strings.TrimSpace(agent.AgentKey)
+		agent.DisplayName = strings.TrimSpace(agent.DisplayName)
+		agent.Role = strings.TrimSpace(agent.Role)
+		if agent.AgentKey == "" || seen[agent.AgentKey] {
+			continue
+		}
+		if agent.DisplayName == "" {
+			agent.DisplayName = agent.AgentKey
+		}
+		seen[agent.AgentKey] = true
+		result = append(result, agent)
+	}
+	return result
 }
 
 func buildDesktopOnlineList(status kanban.DesktopStatus, agentResults map[string]desktopAgentLoadResult) kanban.DesktopOnlineListResult {

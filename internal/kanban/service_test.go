@@ -426,6 +426,50 @@ func TestServiceMovesAssistantFailureBackToTodo(t *testing.T) {
 	}
 }
 
+func TestServiceAppliesLateCompletionAfterFailedEvent(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	issue := createIssue(t, service, "Recovered assistant task")
+	chatID := "chat-recovered"
+	runID := "run-recovered"
+	_, err := service.StartRun(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, strPtr("agent"), kanban.StartRunResult{
+		OK:      true,
+		Message: "started",
+		ChatID:  &chatID,
+		RunID:   &runID,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failed, err := service.SyncAssistantEvent(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.AssistantEvent{
+		Type:   "run.error",
+		ChatID: &chatID,
+		RunID:  &runID,
+	}, "desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !failed.OK || failed.Issue == nil || failed.Issue.Status != kanban.StatusTodo || failed.Issue.RunID != nil {
+		t.Fatalf("expected failed event to clear the visible run id and move issue to todo: %#v", failed)
+	}
+
+	completed, err := service.SyncAssistantEvent(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.AssistantEvent{
+		Type:   "run.complete",
+		ChatID: &chatID,
+		RunID:  &runID,
+	}, "desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !completed.OK || completed.Issue == nil || completed.Issue.Status != kanban.StatusCompleted {
+		t.Fatalf("expected late completion to find active agent_run and complete issue: %#v", completed)
+	}
+	if completed.Issue.RunState == nil || *completed.Issue.RunState != kanban.RunStateCompleted {
+		t.Fatalf("expected completed run state, got %#v", completed.Issue)
+	}
+}
+
 func TestServiceMovesAssistantCancelBackToTodo(t *testing.T) {
 	service, closeStore := newTestService(t)
 	defer closeStore()

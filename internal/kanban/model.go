@@ -224,10 +224,12 @@ type AssignAndRunInput struct {
 }
 
 type AssistantEvent struct {
-	Type   string  `json:"type"`
-	Status *string `json:"status"`
-	ChatID *string `json:"chatId"`
-	RunID  *string `json:"runId"`
+	Type    string  `json:"type"`
+	Status  *string `json:"status"`
+	ChatID  *string `json:"chatId"`
+	RunID   *string `json:"runId"`
+	Message *string `json:"message,omitempty"`
+	Error   any     `json:"error,omitempty"`
 }
 
 type StartRunResult struct {
@@ -247,13 +249,14 @@ type DesktopStatus struct {
 }
 
 type DesktopSessionStatus struct {
-	SessionID         string    `json:"sessionId"`
-	DeviceID          string    `json:"deviceId,omitempty"`
-	CurrentUserID     string    `json:"currentUserId,omitempty"`
-	CurrentUserName   string    `json:"currentUserName,omitempty"`
-	SelectedProjectID string    `json:"selectedProjectId,omitempty"`
-	Capabilities      []string  `json:"capabilities"`
-	LastSeenAt        time.Time `json:"lastSeenAt"`
+	SessionID         string               `json:"sessionId"`
+	DeviceID          string               `json:"deviceId,omitempty"`
+	CurrentUserID     string               `json:"currentUserId,omitempty"`
+	CurrentUserName   string               `json:"currentUserName,omitempty"`
+	SelectedProjectID string               `json:"selectedProjectId,omitempty"`
+	Capabilities      []string             `json:"capabilities"`
+	Agents            []DesktopAgentOption `json:"agents,omitempty"`
+	LastSeenAt        time.Time            `json:"lastSeenAt"`
 }
 
 type DesktopAgentOption struct {

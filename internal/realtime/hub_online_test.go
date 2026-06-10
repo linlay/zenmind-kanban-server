@@ -150,6 +150,238 @@ func TestHubAcceptsNewProtocolIssueCreateOp(t *testing.T) {
 	}
 }
 
+func TestHubDesktopHelloReplacesDuplicateDeviceSessions(t *testing.T) {
+	hub, closeStore := newTestHub(t)
+	defer closeStore()
+	first := &Session{
+		id:        "desktop-old",
+		role:      "desktop",
+		board:     kanban.DefaultBoardID,
+		projectID: kanban.DefaultProjectID,
+		hub:       hub,
+		send:      make(chan OutEnvelope, 8),
+		closed:    make(chan struct{}),
+	}
+	second := &Session{
+		id:        "desktop-new",
+		role:      "desktop",
+		board:     kanban.DefaultBoardID,
+		projectID: kanban.DefaultProjectID,
+		hub:       hub,
+		send:      make(chan OutEnvelope, 8),
+		closed:    make(chan struct{}),
+	}
+	hub.register(first)
+	hub.register(second)
+	payload, err := json.Marshal(map[string]any{
+		"deviceId":          "device-1",
+		"selectedProjectId": kanban.DefaultProjectID,
+		"capabilities":      []string{"desktop.assistant.listAgents"},
+		"currentUser": map[string]string{
+			"id":   "user-1",
+			"name": "Desktop User",
+		},
+		"agents": []map[string]string{
+			{"agentKey": "cutej", "displayName": "小君", "role": "桌面智能体"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hub.handle(first, Envelope{
+		V:         ProtocolVersion,
+		Type:      "rpc.req",
+		ID:        "hello-old",
+		Op:        "desktop.hello",
+		Role:      "desktop",
+		BoardID:   kanban.DefaultBoardID,
+		ProjectID: kanban.DefaultProjectID,
+		Payload:   payload,
+	})
+	<-first.send
+	hub.handle(second, Envelope{
+		V:         ProtocolVersion,
+		Type:      "rpc.req",
+		ID:        "hello-new",
+		Op:        "desktop.hello",
+		Role:      "desktop",
+		BoardID:   kanban.DefaultBoardID,
+		ProjectID: kanban.DefaultProjectID,
+		Payload:   payload,
+	})
+	<-second.send
+
+	select {
+	case <-first.closed:
+	default:
+		t.Fatal("expected old desktop session to be closed")
+	}
+	status := hub.DesktopStatus()
+	if len(status.Sessions) != 1 || status.Sessions[0].SessionID != second.id {
+		t.Fatalf("expected only newest desktop session, got %#v", status.Sessions)
+	}
+	if len(status.Sessions[0].Agents) != 1 || status.Sessions[0].Agents[0].AgentKey != "cutej" {
+		t.Fatalf("expected desktop hello agents to be cached, got %#v", status.Sessions[0].Agents)
+	}
+}
+
+func TestHubAssignAndRunForwardsCloudIssueToDesktopAndUpdatesRun(t *testing.T) {
+	hub, closeStore := newTestHub(t)
+	defer closeStore()
+	agentKey := "codeAssistant"
+	created, err := hub.service.CreateIssue(context.Background(), kanban.DefaultBoardID, kanban.IssueInput{
+		Title:            "Cloud run task",
+		AssigneeAgentKey: &agentKey,
+	}, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Issue == nil {
+		t.Fatal("expected created issue")
+	}
+	web := &Session{
+		id:        "web-run",
+		role:      "web",
+		board:     kanban.DefaultBoardID,
+		projectID: kanban.DefaultProjectID,
+		send:      make(chan OutEnvelope, 8),
+	}
+	desktop := &Session{
+		id:        "desktop-run",
+		role:      "desktop",
+		board:     kanban.DefaultBoardID,
+		projectID: kanban.DefaultProjectID,
+		hub:       hub,
+		send:      make(chan OutEnvelope, 8),
+		closed:    make(chan struct{}),
+	}
+	hub.register(desktop)
+	helloPayload, err := json.Marshal(map[string]any{
+		"deviceId":          "device-run",
+		"selectedProjectId": kanban.DefaultProjectID,
+		"capabilities":      []string{"desktop.assistant.startRun"},
+		"currentUser": map[string]string{
+			"id":   "desktop-user",
+			"name": "Desktop User",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.handle(desktop, Envelope{
+		V:         ProtocolVersion,
+		Type:      "rpc.req",
+		ID:        "hello-run",
+		Op:        "desktop.hello",
+		Role:      "desktop",
+		BoardID:   kanban.DefaultBoardID,
+		ProjectID: kanban.DefaultProjectID,
+		Payload:   helloPayload,
+	})
+	<-desktop.send // hello response
+	<-desktop.send // initial snapshot
+
+	assignPayload, err := json.Marshal(kanban.AssignAndRunInput{
+		ID:                     created.Issue.ID,
+		AgentKey:               &agentKey,
+		BaseIssueRevision:      &created.Issue.Revision,
+		IdempotencyKey:         "assign-run-test",
+		TargetDesktopSessionID: desktop.id,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		hub.handle(web, Envelope{
+			V:         ProtocolVersion,
+			Type:      "rpc.req",
+			ID:        "assign-run",
+			Op:        "kanban.issue.assignAndRun",
+			Role:      "web",
+			BoardID:   kanban.DefaultBoardID,
+			ProjectID: kanban.DefaultProjectID,
+			Payload:   assignPayload,
+		})
+		close(done)
+	}()
+
+	var desktopRequest OutEnvelope
+	for {
+		select {
+		case desktopRequest = <-desktop.send:
+			if desktopRequest.Op == "desktop.assistant.startRun" {
+				goto gotDesktopRequest
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for desktop.assistant.startRun")
+		}
+	}
+gotDesktopRequest:
+	if desktopRequest.Op != "desktop.assistant.startRun" {
+		t.Fatalf("expected desktop.assistant.startRun, got %q", desktopRequest.Op)
+	}
+	requestPayload, ok := desktopRequest.Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("expected desktop request map payload, got %T", desktopRequest.Payload)
+	}
+	forwardedAgentKey, ok := requestPayload["agentKey"].(*string)
+	if !ok || forwardedAgentKey == nil || *forwardedAgentKey != agentKey {
+		t.Fatalf("expected agent key %q, got %#v", agentKey, requestPayload["agentKey"])
+	}
+	remoteIssue, ok := requestPayload["issue"].(*kanban.Issue)
+	if !ok || remoteIssue.ID != created.Issue.ID || remoteIssue.Title != "Cloud run task" {
+		t.Fatalf("expected forwarded cloud issue, got %#v", requestPayload["issue"])
+	}
+
+	runID := "run-from-desktop"
+	chatID := "chat-from-desktop"
+	desktopResult, err := json.Marshal(kanban.StartRunResult{
+		OK:      true,
+		Message: "started",
+		RunID:   &runID,
+		ChatID:  &chatID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.handle(desktop, Envelope{
+		V:         ProtocolVersion,
+		Type:      "rpc.res",
+		ID:        desktopRequest.ID,
+		Op:        desktopRequest.Op,
+		Role:      "desktop",
+		BoardID:   kanban.DefaultBoardID,
+		ProjectID: kanban.DefaultProjectID,
+		OK:        boolPtr(true),
+		Payload:   desktopResult,
+	})
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for assignAndRun")
+	}
+	response := <-web.send
+	if response.OK == nil || !*response.OK {
+		t.Fatalf("expected assignAndRun ok response, got %#v", response)
+	}
+	result, ok := response.Payload.(kanban.ChangeResult)
+	if !ok || !result.OK || result.Issue == nil {
+		t.Fatalf("expected ChangeResult payload, got %#v", response.Payload)
+	}
+	if result.Issue.RunID == nil || *result.Issue.RunID != runID {
+		t.Fatalf("expected run id %q, got %#v", runID, result.Issue.RunID)
+	}
+	if result.Issue.ChatID == nil || *result.Issue.ChatID != chatID {
+		t.Fatalf("expected chat id %q, got %#v", chatID, result.Issue.ChatID)
+	}
+	if result.Issue.RunState == nil || *result.Issue.RunState != kanban.RunStateRunning {
+		t.Fatalf("expected running state, got %#v", result.Issue.RunState)
+	}
+}
+
 func TestHubHandlesProjectBindingRPCs(t *testing.T) {
 	hub, closeStore := newTestHub(t)
 	defer closeStore()

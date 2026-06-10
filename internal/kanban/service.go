@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -653,6 +654,7 @@ func (s *Service) SyncAssistantEvent(ctx context.Context, boardID string, projec
 	if runState == nil {
 		return changeError(boardID, projectID, revision, current, "无需同步的智能体事件。"), nil
 	}
+	eventMessage := assistantEventMessage(event)
 	var issue *Issue
 	if event.RunID != nil {
 		trimmed := strings.TrimSpace(*event.RunID)
@@ -660,6 +662,12 @@ func (s *Service) SyncAssistantEvent(ctx context.Context, boardID string, projec
 			if current[i].RunID != nil && *current[i].RunID == trimmed {
 				issue = &current[i]
 				break
+			}
+		}
+		if issue == nil {
+			issue, err = s.findIssueByHistoricalRunID(ctx, current, trimmed)
+			if err != nil {
+				return ChangeResult{}, err
 			}
 		}
 	}
@@ -718,7 +726,7 @@ func (s *Service) SyncAssistantEvent(ctx context.Context, boardID string, projec
 	}
 	return s.withProjectIssueStats(ctx, boardID, ChangeResult{
 		OK:        true,
-		Message:   "task 运行状态已更新。",
+		Message:   assistantEventChangeMessage(runState, eventMessage),
 		BoardID:   boardID,
 		ProjectID: projectID,
 		Revision:  nextRevision,
@@ -727,6 +735,38 @@ func (s *Service) SyncAssistantEvent(ctx context.Context, boardID string, projec
 		Issue:     findIssue(issues, issue.ID),
 		Issues:    issues,
 	})
+}
+
+func (s *Service) findIssueByHistoricalRunID(ctx context.Context, current []Issue, runID string) (*Issue, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, nil
+	}
+	issueIDs := snapshotIssueIDs(current)
+	if len(issueIDs) == 0 {
+		return nil, nil
+	}
+	runs, err := s.repo.ListAgentRunsForIssues(ctx, issueIDs)
+	if err != nil {
+		return nil, err
+	}
+	issueByID := make(map[string]*Issue, len(current))
+	for i := range current {
+		issueByID[current[i].ID] = &current[i]
+	}
+	for _, run := range runs {
+		if run.RunID == nil || strings.TrimSpace(*run.RunID) != runID {
+			continue
+		}
+		issue := issueByID[run.IssueID]
+		if issue == nil || issue.ActiveRunID == nil {
+			continue
+		}
+		if strings.TrimSpace(*issue.ActiveRunID) == strings.TrimSpace(run.ID) {
+			return issue, nil
+		}
+	}
+	return nil, nil
 }
 
 func (s *Service) updateIssue(
@@ -1548,6 +1588,54 @@ func runStateFromAssistantEvent(event AssistantEvent) *RunState {
 		return &state
 	}
 	return nil
+}
+
+func assistantEventChangeMessage(runState *RunState, detail string) string {
+	if runState == nil || strings.TrimSpace(detail) == "" {
+		return "task 运行状态已更新。"
+	}
+	switch *runState {
+	case RunStateFailed:
+		return "task 运行失败：" + strings.TrimSpace(detail)
+	case RunStateCancelled:
+		return "task 运行已取消：" + strings.TrimSpace(detail)
+	default:
+		return "task 运行状态已更新。"
+	}
+}
+
+func assistantEventMessage(event AssistantEvent) string {
+	if event.Message != nil && strings.TrimSpace(*event.Message) != "" {
+		return strings.TrimSpace(*event.Message)
+	}
+	return assistantEventErrorText(event.Error)
+}
+
+func assistantEventErrorText(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case map[string]any:
+		for _, key := range []string{"message", "msg", "detail", "code", "type"} {
+			if text, ok := typed[key].(string); ok && strings.TrimSpace(text) != "" {
+				return strings.TrimSpace(text)
+			}
+		}
+		if bytes, err := json.Marshal(typed); err == nil {
+			return string(bytes)
+		}
+	case []any:
+		if bytes, err := json.Marshal(typed); err == nil {
+			return string(bytes)
+		}
+	default:
+		if bytes, err := json.Marshal(typed); err == nil {
+			return string(bytes)
+		}
+	}
+	return ""
 }
 
 var ErrDesktopUnavailable = errors.New("desktop client unavailable")
