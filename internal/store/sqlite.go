@@ -358,6 +358,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			COST_MICROS_ INTEGER,
 			STARTED_AT_ TEXT,
 			FINISHED_AT_ TEXT,
+			RESULT_MESSAGE_ TEXT,
 			ERROR_MESSAGE_ TEXT,
 			CREATED_AT_ TEXT NOT NULL,
 			UPDATED_AT_ TEXT NOT NULL
@@ -418,6 +419,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS desktop_client (
 			SESSION_ID_ TEXT PRIMARY KEY,
 			DEVICE_ID_ TEXT,
+			DEVICE_NAME_ TEXT,
+			DEVICE_ALIAS_ TEXT,
+			HOSTNAME_ TEXT,
+			USERNAME_ TEXT,
 			CURRENT_USER_ID_ TEXT,
 			CURRENT_USER_NAME_ TEXT,
 			CAPABILITIES_JSON_ TEXT NOT NULL DEFAULT '[]',
@@ -459,6 +464,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.migrateAddProjectBindingSyncSinceAt(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateAddAgentRunResultMessageColumn(ctx); err != nil {
 		return err
 	}
 	if err := s.rebuildProjectClosure(ctx); err != nil {
@@ -590,6 +598,10 @@ func (s *Store) migrateAddWorkflowTransitionModeColumn(ctx context.Context) erro
 func (s *Store) migrateAddDesktopClientMetadataColumns(ctx context.Context) error {
 	columns := []string{
 		`ALTER TABLE desktop_client ADD COLUMN DEVICE_ID_ TEXT`,
+		`ALTER TABLE desktop_client ADD COLUMN DEVICE_NAME_ TEXT`,
+		`ALTER TABLE desktop_client ADD COLUMN DEVICE_ALIAS_ TEXT`,
+		`ALTER TABLE desktop_client ADD COLUMN HOSTNAME_ TEXT`,
+		`ALTER TABLE desktop_client ADD COLUMN USERNAME_ TEXT`,
 		`ALTER TABLE desktop_client ADD COLUMN CURRENT_USER_ID_ TEXT`,
 		`ALTER TABLE desktop_client ADD COLUMN CURRENT_USER_NAME_ TEXT`,
 	}
@@ -612,6 +624,14 @@ func (s *Store) migrateAddProjectBindingSyncSinceAt(ctx context.Context) error {
 	// 老库回填:已有绑定以创建时间作为 future 策略锚点
 	_, err = s.db.ExecContext(ctx, `UPDATE project_desktop_binding SET SYNC_SINCE_AT_ = CREATED_AT_ WHERE SYNC_SINCE_AT_ IS NULL`)
 	return err
+}
+
+func (s *Store) migrateAddAgentRunResultMessageColumn(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `ALTER TABLE agent_run ADD COLUMN RESULT_MESSAGE_ TEXT`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) migrateDropLegacyIssueTypeColumn(ctx context.Context) error {
@@ -1576,7 +1596,7 @@ func (s *Store) Revision(ctx context.Context, boardID string) (int64, error) {
 	return revision, err
 }
 
-func (s *Store) SaveDesktopClient(ctx context.Context, sessionID string, deviceID string, currentUserID string, currentUserName string, capabilities []string, selectedProjectID string) error {
+func (s *Store) SaveDesktopClient(ctx context.Context, sessionID string, deviceID string, deviceName string, deviceAlias string, hostname string, username string, currentUserID string, currentUserName string, capabilities []string, selectedProjectID string) error {
 	data, err := json.Marshal(capabilities)
 	if err != nil {
 		return err
@@ -1586,16 +1606,20 @@ func (s *Store) SaveDesktopClient(ctx context.Context, sessionID string, deviceI
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO desktop_client (SESSION_ID_, DEVICE_ID_, CURRENT_USER_ID_, CURRENT_USER_NAME_, CAPABILITIES_JSON_, SELECTED_PROJECT_ID_, CONNECTED_AT_, LAST_SEEN_AT_)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO desktop_client (SESSION_ID_, DEVICE_ID_, DEVICE_NAME_, DEVICE_ALIAS_, HOSTNAME_, USERNAME_, CURRENT_USER_ID_, CURRENT_USER_NAME_, CAPABILITIES_JSON_, SELECTED_PROJECT_ID_, CONNECTED_AT_, LAST_SEEN_AT_)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(SESSION_ID_) DO UPDATE SET
 			DEVICE_ID_ = excluded.DEVICE_ID_,
+			DEVICE_NAME_ = excluded.DEVICE_NAME_,
+			DEVICE_ALIAS_ = excluded.DEVICE_ALIAS_,
+			HOSTNAME_ = excluded.HOSTNAME_,
+			USERNAME_ = excluded.USERNAME_,
 			CURRENT_USER_ID_ = excluded.CURRENT_USER_ID_,
 			CURRENT_USER_NAME_ = excluded.CURRENT_USER_NAME_,
 			CAPABILITIES_JSON_ = excluded.CAPABILITIES_JSON_,
 			SELECTED_PROJECT_ID_ = excluded.SELECTED_PROJECT_ID_,
 			LAST_SEEN_AT_ = excluded.LAST_SEEN_AT_
-	`, sessionID, nullIfEmpty(deviceID), nullIfEmpty(currentUserID), nullIfEmpty(currentUserName), string(data), selectedProjectID, now, now)
+	`, sessionID, nullIfEmpty(deviceID), nullIfEmpty(deviceName), nullIfEmpty(deviceAlias), nullIfEmpty(hostname), nullIfEmpty(username), nullIfEmpty(currentUserID), nullIfEmpty(currentUserName), string(data), selectedProjectID, now, now)
 	return err
 }
 

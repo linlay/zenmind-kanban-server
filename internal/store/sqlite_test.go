@@ -106,7 +106,8 @@ func TestSchemaCreatesFinalWorkflowColumns(t *testing.T) {
 		"workflow_status":     {"STAGE_ID_", "IS_ACTIVE_"},
 		"workflow_transition": {"IS_ACTIVE_"},
 		"issue":               {"SEVERITY_"},
-		"desktop_client":      {"DEVICE_ID_", "CURRENT_USER_ID_", "CURRENT_USER_NAME_"},
+		"agent_run":           {"RESULT_MESSAGE_"},
+		"desktop_client":      {"DEVICE_ID_", "DEVICE_NAME_", "DEVICE_ALIAS_", "HOSTNAME_", "USERNAME_", "CURRENT_USER_ID_", "CURRENT_USER_NAME_"},
 	}
 	for table, columns := range expected {
 		for _, column := range columns {

@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,8 +53,32 @@ func main() {
 		}
 		writeJSON(w, http.StatusOK, result)
 	})
+	mux.HandleFunc("/api/rpc", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if cfg.Token != "" && r.Header.Get("Authorization") != "Bearer "+cfg.Token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var env realtime.Envelope
+		if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "请求 payload 格式无效。"})
+			return
+		}
+		result, err := hub.HandleHTTPRPC(r.Context(), env)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "message": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	})
 	mux.HandleFunc("/api/issues", handleIssues(cfg, service))
 	mux.HandleFunc("/ws", hub.ServeWS)
+	if cfg.StaticDir != "" {
+		mux.HandleFunc("/", handleStatic(cfg.StaticDir))
+	}
 
 	server := &http.Server{
 		Addr:              cfg.Addr,
@@ -61,7 +87,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("kanban server listening", "addr", cfg.Addr, "db", cfg.DatabasePath)
+		logger.Info("kanban server listening", "addr", cfg.Addr, "db", cfg.DatabasePath, "staticDir", cfg.StaticDir)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server failed", "error", err)
 			stop()
@@ -76,6 +102,34 @@ func main() {
 	}
 }
 
+func handleStatic(staticDir string) http.HandlerFunc {
+	root := filepath.Clean(staticDir)
+	indexPath := filepath.Join(root, "index.html")
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		relPath := strings.TrimPrefix(filepath.Clean("/"+r.URL.Path), string(os.PathSeparator))
+		if relPath == "." || relPath == "" {
+			relPath = "index.html"
+		}
+
+		filePath := filepath.Join(root, relPath)
+		info, err := os.Stat(filePath)
+		if err != nil || info.IsDir() {
+			filePath = indexPath
+		}
+
+		if _, err := os.Stat(filePath); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, filePath)
+	}
+}
+
 func withCORS(cfg config.Config, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -85,7 +139,7 @@ func withCORS(cfg config.Config, next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 			}
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

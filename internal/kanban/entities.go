@@ -221,24 +221,25 @@ type ReviewCommentUpdateInput struct {
 }
 
 type AgentRun struct {
-	ID           string     `json:"id"`
-	IssueID      string     `json:"issueId"`
-	AgentID      *string    `json:"agentId,omitempty"`
-	WorkerAgent  *string    `json:"workerAgent,omitempty"`
-	DelegatedBy  *string    `json:"delegatedBy,omitempty"`
-	ChatID       *string    `json:"chatId,omitempty"`
-	RunID        *string    `json:"runId,omitempty"`
-	SessionID    *string    `json:"sessionId,omitempty"`
-	Status       string     `json:"status"`
-	Confidence   *float64   `json:"confidence,omitempty"`
-	InputTokens  *int64     `json:"inputTokens,omitempty"`
-	OutputTokens *int64     `json:"outputTokens,omitempty"`
-	CostMicros   *int64     `json:"costMicros,omitempty"`
-	StartedAt    *time.Time `json:"startedAt,omitempty"`
-	FinishedAt   *time.Time `json:"finishedAt,omitempty"`
-	ErrorMessage *string    `json:"errorMessage,omitempty"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	UpdatedAt    time.Time  `json:"updatedAt"`
+	ID            string     `json:"id"`
+	IssueID       string     `json:"issueId"`
+	AgentID       *string    `json:"agentId,omitempty"`
+	WorkerAgent   *string    `json:"workerAgent,omitempty"`
+	DelegatedBy   *string    `json:"delegatedBy,omitempty"`
+	ChatID        *string    `json:"chatId,omitempty"`
+	RunID         *string    `json:"runId,omitempty"`
+	SessionID     *string    `json:"sessionId,omitempty"`
+	Status        string     `json:"status"`
+	Confidence    *float64   `json:"confidence,omitempty"`
+	InputTokens   *int64     `json:"inputTokens,omitempty"`
+	OutputTokens  *int64     `json:"outputTokens,omitempty"`
+	CostMicros    *int64     `json:"costMicros,omitempty"`
+	StartedAt     *time.Time `json:"startedAt,omitempty"`
+	FinishedAt    *time.Time `json:"finishedAt,omitempty"`
+	ResultMessage *string    `json:"resultMessage,omitempty"`
+	ErrorMessage  *string    `json:"errorMessage,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
 }
 
 type AgentToolCall struct {

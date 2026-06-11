@@ -174,8 +174,8 @@ func (h *Hub) handle(session *Session, env Envelope) {
 	case "snapshot.get":
 		session.sendSnapshotFor(env)
 	case "issue.create":
-		var input kanban.IssueInput
-		if !decodeOrRespond(session, env, &input) {
+		input, targetDesktopSessionID, ok := decodeIssueCreatePayload(session, env)
+		if !ok {
 			return
 		}
 		if input.ProjectID == nil {
@@ -183,6 +183,17 @@ func (h *Hub) handle(session *Session, env Envelope) {
 			input.ProjectID = &projectID
 		}
 		result, err := h.service.CreateIssue(context.Background(), env.BoardID, input, session.actorID())
+		if err == nil && result.OK && result.Issue != nil {
+			targetDesktopSessionID = h.resolveDispatchTarget(env.ProjectID, targetDesktopSessionID)
+			binding, denyReason := h.ensureDispatchBinding(env.ProjectID, targetDesktopSessionID)
+			if denyReason != "" {
+				result.OK = false
+				result.Code = "binding_forbidden"
+				result.Message = denyReason
+			} else {
+				h.pinDispatchedIssue(binding, result.Issue.ID)
+			}
+		}
 		h.respondChange(session, env, result, err, "kanban.issue.created")
 	case "issue.update":
 		var payload struct {
@@ -638,61 +649,66 @@ func (h *Hub) snapshotForSession(session *Session, boardID string, projectID str
 }
 
 func (h *Hub) applyDesktopSnapshotScope(session *Session, snapshot *kanban.ListResult) {
-	if session.role != "desktop" || session.scope != "current_user" {
+	if session.role != "desktop" {
 		return
 	}
-	snapshot.Scope = "current_user"
-	snapshot.Complete = false
-	currentUserID := strings.TrimSpace(session.currentUser.ID)
-	if currentUserID == "" {
-		snapshot.Issues = []kanban.Issue{}
-		snapshot.ProjectIssueStats = kanban.ComputeProjectIssueStats(snapshot.Projects, snapshot.Issues)
-		snapshot.IssueLabelLinks = []kanban.IssueLabelLink{}
-		snapshot.IssueDependencies = []kanban.IssueDependency{}
-		snapshot.Reviews = []kanban.Review{}
-		snapshot.ReviewComments = []kanban.ReviewComment{}
-		snapshot.AgentRuns = []kanban.AgentRun{}
-		snapshot.AgentToolCalls = []kanban.AgentToolCall{}
-		snapshot.RecentEvents = []kanban.EventLogItem{}
-		return
-	}
+	if session.scope == "current_user" {
+		snapshot.Scope = "current_user"
+		snapshot.Complete = false
+		currentUserID := strings.TrimSpace(session.currentUser.ID)
+		if currentUserID == "" {
+			filterSnapshotIssues(snapshot, func(kanban.Issue) bool { return false })
+			return
+		}
 
-	issueIDs := map[string]bool{}
-	filteredIssues := make([]kanban.Issue, 0, len(snapshot.Issues))
-	for _, issue := range snapshot.Issues {
-		if !issueVisibleToDesktopUser(issue, currentUserID) {
+		filterSnapshotIssues(snapshot, func(issue kanban.Issue) bool {
+			return issueVisibleToDesktopUser(issue, currentUserID)
+		})
+	}
+	applyDesktopDispatchTargetScope(session, snapshot)
+}
+
+func applyDesktopDispatchTargetScope(session *Session, snapshot *kanban.ListResult) {
+	targetSessionIDsByIssue := map[string]map[string]bool{}
+	for _, run := range snapshot.AgentRuns {
+		sessionID := ptrStringValue(run.SessionID)
+		if sessionID == "" {
 			continue
 		}
-		filteredIssues = append(filteredIssues, issue)
-		issueIDs[issue.ID] = true
+		if targetSessionIDsByIssue[run.IssueID] == nil {
+			targetSessionIDsByIssue[run.IssueID] = map[string]bool{}
+		}
+		targetSessionIDsByIssue[run.IssueID][sessionID] = true
 	}
-	snapshot.Issues = filteredIssues
-	snapshot.ProjectIssueStats = kanban.ComputeProjectIssueStats(snapshot.Projects, snapshot.Issues)
-
-	snapshot.IssueLabelLinks = filterSlice(snapshot.IssueLabelLinks, func(link kanban.IssueLabelLink) bool {
-		return issueIDs[link.IssueID]
-	})
-	snapshot.IssueDependencies = filterSlice(snapshot.IssueDependencies, func(dependency kanban.IssueDependency) bool {
-		return issueIDs[dependency.FromIssueID] || issueIDs[dependency.ToIssueID]
-	})
-	snapshot.Reviews = filterSlice(snapshot.Reviews, func(review kanban.Review) bool {
-		return issueIDs[review.IssueID]
-	})
-	snapshot.ReviewComments = filterSlice(snapshot.ReviewComments, func(comment kanban.ReviewComment) bool {
-		return issueIDs[comment.IssueID]
-	})
-	snapshot.AgentRuns = filterSlice(snapshot.AgentRuns, func(run kanban.AgentRun) bool {
-		return issueIDs[run.IssueID]
-	})
-	runIDs := map[string]bool{}
-	for _, run := range snapshot.AgentRuns {
-		runIDs[run.ID] = true
+	bindingsByID := map[string]kanban.ProjectBinding{}
+	for _, binding := range snapshot.ProjectBindings {
+		bindingsByID[binding.ID] = binding
 	}
-	snapshot.AgentToolCalls = filterSlice(snapshot.AgentToolCalls, func(toolCall kanban.AgentToolCall) bool {
-		return runIDs[toolCall.AgentRunID]
-	})
-	snapshot.RecentEvents = filterSlice(snapshot.RecentEvents, func(event kanban.EventLogItem) bool {
-		return event.IssueID != nil && issueIDs[*event.IssueID]
+	targetDeviceIDsByIssue := map[string]map[string]bool{}
+	for _, item := range snapshot.ProjectBindingIssues {
+		binding, ok := bindingsByID[item.BindingID]
+		if !ok {
+			continue
+		}
+		deviceID := strings.TrimSpace(binding.DeviceID)
+		if deviceID == "" {
+			continue
+		}
+		if targetDeviceIDsByIssue[item.IssueID] == nil {
+			targetDeviceIDsByIssue[item.IssueID] = map[string]bool{}
+		}
+		targetDeviceIDsByIssue[item.IssueID][deviceID] = true
+	}
+	sessionID := strings.TrimSpace(session.id)
+	deviceID := strings.TrimSpace(session.deviceID)
+	filterSnapshotIssues(snapshot, func(issue kanban.Issue) bool {
+		if targetSessions := targetSessionIDsByIssue[issue.ID]; len(targetSessions) > 0 {
+			return targetSessions[sessionID]
+		}
+		if targetDevices := targetDeviceIDsByIssue[issue.ID]; len(targetDevices) > 0 {
+			return targetDevices[deviceID]
+		}
+		return true
 	})
 }
 
@@ -898,6 +914,11 @@ func (h *Hub) assignAndRun(session *Session, env Envelope) {
 	if !decodeOrRespond(session, env, &input) {
 		return
 	}
+	accessLevel, ok := normalizeAssistantAccessLevel(input.AccessLevel)
+	if !ok {
+		session.respondError(env, "bad_payload", "accessLevel must be default, auto_approve, or full_access")
+		return
+	}
 	snapshot, err := h.service.Snapshot(context.Background(), env.BoardID, env.ProjectID, h.DesktopStatus())
 	if err != nil {
 		session.respondError(env, "server_error", err.Error())
@@ -927,7 +948,7 @@ func (h *Hub) assignAndRun(session *Session, env Envelope) {
 		agentKey = issue.AssigneeAgentKey
 	}
 	input.TargetDesktopSessionID = h.resolveDispatchTarget(env.ProjectID, input.TargetDesktopSessionID)
-	binding, denyReason := h.resolveDispatchBinding(env.ProjectID, input.TargetDesktopSessionID)
+	binding, denyReason := h.ensureDispatchBinding(env.ProjectID, input.TargetDesktopSessionID)
 	if denyReason != "" {
 		session.respond(env, kanban.ChangeResult{OK: false, Code: "binding_forbidden", Message: denyReason, BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issue: issue, Issues: kanban.SortIssues(snapshot.Issues), ProjectIssueStats: snapshot.ProjectIssueStats})
 		return
@@ -937,6 +958,9 @@ func (h *Hub) assignAndRun(session *Session, env Envelope) {
 			"issue":    issue,
 			"agentKey": agentKey,
 			"message":  buildAssistantPrompt(*issue),
+		}
+		if accessLevel != "" {
+			payload["accessLevel"] = accessLevel
 		}
 		if bindingContext := dispatchBindingContext(binding); bindingContext != nil {
 			payload["binding"] = bindingContext
@@ -949,6 +973,7 @@ func (h *Hub) assignAndRun(session *Session, env Envelope) {
 		if err := json.Unmarshal(response.Payload, &result); err != nil {
 			return kanban.ChangeResult{OK: false, Message: "desktop 返回格式无效。", BoardID: env.BoardID, ProjectID: env.ProjectID, Revision: snapshot.Revision, Complete: true, Scope: "project", Issues: snapshot.Issues, ProjectIssueStats: snapshot.ProjectIssueStats}, nil
 		}
+		result.SessionID = input.TargetDesktopSessionID
 		change, err := h.service.StartRun(context.Background(), env.BoardID, env.ProjectID, input.ID, agentKey, result, session.actorID())
 		if err != nil {
 			return nil, err
@@ -970,6 +995,18 @@ func (h *Hub) assignAndRun(session *Session, env Envelope) {
 		return
 	}
 	h.respondChange(session, env, result, nil, "kanban.issue.updated")
+}
+
+func normalizeAssistantAccessLevel(value string) (string, bool) {
+	trimmed := strings.TrimSpace(value)
+	switch trimmed {
+	case "":
+		return "", true
+	case "default", "auto_approve", "full_access":
+		return trimmed, true
+	default:
+		return "", false
+	}
 }
 
 func (h *Hub) dispatchToDesktop(session *Session, env Envelope) {
@@ -1006,7 +1043,7 @@ func (h *Hub) dispatchToDesktop(session *Session, env Envelope) {
 		}
 	}
 	payload.TargetDesktopSessionID = h.resolveDispatchTarget(env.ProjectID, payload.TargetDesktopSessionID)
-	binding, denyReason := h.resolveDispatchBinding(env.ProjectID, payload.TargetDesktopSessionID)
+	binding, denyReason := h.ensureDispatchBinding(env.ProjectID, payload.TargetDesktopSessionID)
 	if denyReason != "" {
 		session.respond(env, map[string]any{
 			"ok":        false,
@@ -1082,12 +1119,20 @@ func (h *Hub) desktopHello(session *Session, env Envelope) {
 		CurrentUser       DesktopCurrentUser          `json:"currentUser"`
 		Scope             string                      `json:"scope"`
 		DeviceID          string                      `json:"deviceId"`
+		DeviceName        string                      `json:"deviceName"`
+		DeviceAlias       string                      `json:"deviceAlias"`
+		Hostname          string                      `json:"hostname"`
+		Username          string                      `json:"username"`
 		Agents            []kanban.DesktopAgentOption `json:"agents"`
 	}
 	_ = json.Unmarshal(env.Payload, &payload)
 	session.capabilities = payload.Capabilities
 	session.currentUser = payload.CurrentUser
 	session.deviceID = strings.TrimSpace(payload.DeviceID)
+	session.deviceAlias = strings.TrimSpace(payload.DeviceAlias)
+	session.hostname = strings.TrimSpace(payload.Hostname)
+	session.username = strings.TrimSpace(payload.Username)
+	session.deviceName = normalizeDesktopDeviceName(payload.DeviceName, session.deviceAlias, session.hostname, session.username, session.currentUser.Name, session.deviceID)
 	session.scope = strings.TrimSpace(payload.Scope)
 	session.agents = normalizeDesktopAgents(payload.Agents)
 	session.lastSeenAt = time.Now().UTC()
@@ -1098,7 +1143,7 @@ func (h *Hub) desktopHello(session *Session, env Envelope) {
 	h.desktopSessions[session.id] = session
 	h.mu.Unlock()
 	h.unregisterDuplicateDesktopSessions(session)
-	if err := h.store.SaveDesktopClient(context.Background(), session.id, session.deviceID, session.currentUser.ID, session.currentUser.Name, payload.Capabilities, session.projectID); err != nil {
+	if err := h.store.SaveDesktopClient(context.Background(), session.id, session.deviceID, session.deviceName, session.deviceAlias, session.hostname, session.username, session.currentUser.ID, session.currentUser.Name, payload.Capabilities, session.projectID); err != nil {
 		h.logger.Warn("failed to save desktop client", "error", err)
 	}
 	session.respond(env, map[string]any{
@@ -1107,6 +1152,10 @@ func (h *Hub) desktopHello(session *Session, env Envelope) {
 		"sessionId":         session.id,
 		"capabilities":      payload.Capabilities,
 		"selectedProjectId": session.projectID,
+		"deviceName":        session.deviceName,
+		"deviceAlias":       session.deviceAlias,
+		"hostname":          session.hostname,
+		"username":          session.username,
 		"currentUser":       session.currentUser,
 		"scope":             session.scope,
 		"desktopStatus":     h.DesktopStatus(),
@@ -1138,23 +1187,7 @@ func (h *Hub) desktopOnlineList(session *Session, env Envelope) {
 	for _, desktopSession := range status.Sessions {
 		if len(desktopSession.Agents) > 0 {
 			agentResults[desktopSession.SessionID] = desktopAgentLoadResult{agents: desktopSession.Agents}
-			continue
 		}
-		response, err := h.requestDesktop("desktop.assistant.listAgents", env.BoardID, env.ProjectID, desktopSession.SessionID, map[string]any{})
-		if err != nil {
-			agentResults[desktopSession.SessionID] = desktopAgentLoadResult{err: err}
-			continue
-		}
-		var payload desktopAgentListPayload
-		if err := json.Unmarshal(response.Payload, &payload); err != nil {
-			agentResults[desktopSession.SessionID] = desktopAgentLoadResult{err: errors.New("desktop agent 列表返回格式无效。")}
-			continue
-		}
-		agents := payload.Items
-		if len(agents) == 0 {
-			agents = payload.Agents
-		}
-		agentResults[desktopSession.SessionID] = desktopAgentLoadResult{agents: agents}
 	}
 	session.respond(env, buildDesktopOnlineList(status, agentResults))
 }
@@ -1301,6 +1334,9 @@ func (h *Hub) DesktopStatus() kanban.DesktopStatus {
 	defer h.mu.RUnlock()
 	sessions := make([]kanban.DesktopSessionStatus, 0, len(h.desktopSessions))
 	for _, session := range h.desktopSessions {
+		if !hasDesktopHello(session) {
+			continue
+		}
 		lastSeenAt := session.lastSeenAt
 		if lastSeenAt.IsZero() {
 			lastSeenAt = time.Now().UTC()
@@ -1308,6 +1344,10 @@ func (h *Hub) DesktopStatus() kanban.DesktopStatus {
 		sessions = append(sessions, kanban.DesktopSessionStatus{
 			SessionID:         session.id,
 			DeviceID:          session.deviceID,
+			DeviceName:        strings.TrimSpace(session.deviceName),
+			DeviceAlias:       strings.TrimSpace(session.deviceAlias),
+			Hostname:          strings.TrimSpace(session.hostname),
+			Username:          strings.TrimSpace(session.username),
 			CurrentUserID:     strings.TrimSpace(session.currentUser.ID),
 			CurrentUserName:   strings.TrimSpace(session.currentUser.Name),
 			SelectedProjectID: session.projectID,
@@ -1324,6 +1364,44 @@ func (h *Hub) DesktopStatus() kanban.DesktopStatus {
 		status.SelectedProjectID = first.SelectedProjectID
 	}
 	return status
+}
+
+func hasDesktopHello(session *Session) bool {
+	return strings.TrimSpace(session.deviceID) != "" ||
+		strings.TrimSpace(session.currentUser.ID) != "" ||
+		strings.TrimSpace(session.currentUser.Name) != "" ||
+		len(session.capabilities) > 0 ||
+		len(session.agents) > 0
+}
+
+func normalizeDesktopDeviceName(deviceName string, deviceAlias string, hostname string, username string, currentUserName string, deviceID string) string {
+	deviceName = strings.TrimSpace(deviceName)
+	if deviceName != "" {
+		return deviceName
+	}
+	deviceAlias = strings.TrimSpace(deviceAlias)
+	if deviceAlias != "" {
+		return deviceAlias
+	}
+	systemParts := []string{}
+	if hostname = strings.TrimSpace(hostname); hostname != "" {
+		systemParts = append(systemParts, hostname)
+	}
+	if username = strings.TrimSpace(username); username != "" {
+		systemParts = append(systemParts, username)
+	}
+	if len(systemParts) > 0 {
+		return strings.Join(systemParts, " · ")
+	}
+	currentUserName = strings.TrimSpace(currentUserName)
+	if currentUserName != "" && !strings.EqualFold(currentUserName, "Desktop User") {
+		return currentUserName
+	}
+	deviceID = strings.TrimSpace(deviceID)
+	if len(deviceID) > 8 {
+		return deviceID[:8]
+	}
+	return deviceID
 }
 
 func normalizeDesktopAgents(agents []kanban.DesktopAgentOption) []kanban.DesktopAgentOption {
@@ -1364,6 +1442,10 @@ func buildDesktopOnlineList(status kanban.DesktopStatus, agentResults map[string
 			item = &onlineDeviceAccumulator{
 				device: kanban.DesktopOnlineDevice{
 					DeviceID:          deviceID,
+					DeviceName:        strings.TrimSpace(desktopSession.DeviceName),
+					DeviceAlias:       strings.TrimSpace(desktopSession.DeviceAlias),
+					Hostname:          strings.TrimSpace(desktopSession.Hostname),
+					Username:          strings.TrimSpace(desktopSession.Username),
 					CurrentUserID:     strings.TrimSpace(desktopSession.CurrentUserID),
 					CurrentUserName:   strings.TrimSpace(desktopSession.CurrentUserName),
 					SelectedProjectID: strings.TrimSpace(desktopSession.SelectedProjectID),
@@ -1379,8 +1461,18 @@ func buildDesktopOnlineList(status kanban.DesktopStatus, agentResults map[string
 			order = append(order, deviceID)
 		}
 		item.device.Sessions = append(item.device.Sessions, desktopSession)
-		if desktopSession.LastSeenAt.After(item.device.LastSeenAt) {
+		if !desktopSession.LastSeenAt.IsZero() && (item.device.LastSeenAt.IsZero() || !desktopSession.LastSeenAt.Before(item.device.LastSeenAt)) {
 			item.device.LastSeenAt = desktopSession.LastSeenAt
+			item.device.DeviceName = strings.TrimSpace(desktopSession.DeviceName)
+			item.device.DeviceAlias = strings.TrimSpace(desktopSession.DeviceAlias)
+			item.device.Hostname = strings.TrimSpace(desktopSession.Hostname)
+			item.device.Username = strings.TrimSpace(desktopSession.Username)
+			item.device.CurrentUserID = strings.TrimSpace(desktopSession.CurrentUserID)
+			item.device.CurrentUserName = strings.TrimSpace(desktopSession.CurrentUserName)
+			item.device.SelectedProjectID = strings.TrimSpace(desktopSession.SelectedProjectID)
+		}
+		if item.device.DeviceName == "" {
+			item.device.DeviceName = normalizeDesktopDeviceName("", item.device.DeviceAlias, item.device.Hostname, item.device.Username, item.device.CurrentUserName, item.device.DeviceID)
 		}
 		for _, capability := range desktopSession.Capabilities {
 			capability = strings.TrimSpace(capability)
@@ -1391,10 +1483,14 @@ func buildDesktopOnlineList(status kanban.DesktopStatus, agentResults map[string
 			item.device.Capabilities = append(item.device.Capabilities, capability)
 		}
 		result := agentResults[desktopSession.SessionID]
-		if result.err != nil && item.device.AgentError == "" {
+		agents := result.agents
+		if len(agents) == 0 {
+			agents = desktopSession.Agents
+		}
+		if result.err != nil && len(agents) == 0 && item.device.AgentError == "" {
 			item.device.AgentError = result.err.Error()
 		}
-		for _, agent := range result.agents {
+		for _, agent := range agents {
 			agent.AgentKey = strings.TrimSpace(agent.AgentKey)
 			agent.DisplayName = strings.TrimSpace(agent.DisplayName)
 			agent.Role = strings.TrimSpace(agent.Role)
@@ -1488,6 +1584,25 @@ func decodeOrRespond[T any](session *Session, env Envelope, target *T) bool {
 		return false
 	}
 	return true
+}
+
+func decodeIssueCreatePayload(session *Session, env Envelope) (kanban.IssueInput, string, bool) {
+	if len(env.Payload) == 0 {
+		env.Payload = []byte("{}")
+	}
+	var wrapped struct {
+		Input                  *kanban.IssueInput `json:"input"`
+		TargetDesktopSessionID string             `json:"targetDesktopSessionId"`
+	}
+	if err := json.Unmarshal(env.Payload, &wrapped); err == nil && wrapped.Input != nil {
+		return *wrapped.Input, strings.TrimSpace(wrapped.TargetDesktopSessionID), true
+	}
+	var input kanban.IssueInput
+	if err := json.Unmarshal(env.Payload, &input); err != nil {
+		session.respondError(env, "bad_payload", "请求 payload 格式无效。")
+		return kanban.IssueInput{}, "", false
+	}
+	return input, "", true
 }
 
 func buildAssistantPrompt(issue kanban.Issue) string {

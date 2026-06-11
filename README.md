@@ -56,11 +56,13 @@ ZENMIND_KANBAN_ADDR=:8080
 ZENMIND_KANBAN_DB=./data/kanban.db
 ZENMIND_KANBAN_ALLOWED_ORIGINS=https://your-domain.example
 ZENMIND_KANBAN_TOKEN=
+ZENMIND_KANBAN_STATIC_DIR=
 ZENMIND_KANBAN_CONTAINER_DB=/data/kanban.db
 ZENMIND_KANBAN_DOCKER_NETWORK=zenmind-kanban-net
 ```
 
 域名未补充前，`ZENMIND_KANBAN_ALLOWED_ORIGINS` 可临时设为 `*`。上线后应替换成真实 website origin。
+`ZENMIND_KANBAN_STATIC_DIR` 非空时，服务会同源托管前端静态文件，并对 SPA 路由回退到 `index.html`。
 
 当前版本不读取 `configs/*.yml`。配置优先级为：代码默认值 < 环境变量。
 

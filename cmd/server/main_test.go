@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -132,5 +133,55 @@ func TestIssuesHandlerHeaders(t *testing.T) {
 	issueCount := resp.Header.Get("X-Issue-Count")
 	if issueCount == "" || issueCount == "0" {
 		t.Fatalf("expected non-zero X-Issue-Count header, got %q", issueCount)
+	}
+}
+
+func TestStaticHandlerServesAssetAndIndexFallback(t *testing.T) {
+	staticDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("<html>kanban</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staticDir, "app.js"), []byte("console.log('kanban')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(handleStatic(staticDir))
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected asset to return 200, got %d", resp.StatusCode)
+	}
+
+	resp, err = http.Get(ts.URL + "/workflow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected SPA fallback to return 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestStaticHandlerRejectsNonGetAndHead(t *testing.T) {
+	staticDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("<html>kanban</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(handleStatic(staticDir))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/", "text/plain", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", resp.StatusCode)
 	}
 }

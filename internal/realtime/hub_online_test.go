@@ -25,6 +25,7 @@ func TestBuildDesktopOnlineListGroupsSessionsByDeviceID(t *testing.T) {
 			{
 				SessionID:         "session-a",
 				DeviceID:          "device-1",
+				DeviceName:        "旧名字",
 				CurrentUserID:     "user-1",
 				CurrentUserName:   "Alice",
 				SelectedProjectID: "project-a",
@@ -34,6 +35,10 @@ func TestBuildDesktopOnlineListGroupsSessionsByDeviceID(t *testing.T) {
 			{
 				SessionID:         "session-b",
 				DeviceID:          "device-1",
+				DeviceName:        "佳林的 MacBook",
+				DeviceAlias:       "佳林的 MacBook",
+				Hostname:          "Jialin-MacBook",
+				Username:          "jialin",
 				CurrentUserID:     "user-1",
 				CurrentUserName:   "Alice",
 				SelectedProjectID: "project-a",
@@ -86,6 +91,9 @@ func TestBuildDesktopOnlineListGroupsSessionsByDeviceID(t *testing.T) {
 	if device.DeviceID != "device-1" {
 		t.Fatalf("expected first device to be device-1, got %q", device.DeviceID)
 	}
+	if device.DeviceName != "佳林的 MacBook" || device.DeviceAlias != "佳林的 MacBook" || device.Hostname != "Jialin-MacBook" || device.Username != "jialin" {
+		t.Fatalf("expected latest device metadata, got %#v", device)
+	}
 	if len(device.Sessions) != 2 {
 		t.Fatalf("expected device-1 to contain 2 sessions, got %#v", device.Sessions)
 	}
@@ -105,6 +113,30 @@ func TestBuildDesktopOnlineListGroupsSessionsByDeviceID(t *testing.T) {
 	}
 	if fallback.AgentError != "agent-platform unavailable" {
 		t.Fatalf("expected per-device agent error, got %q", fallback.AgentError)
+	}
+}
+
+func TestDesktopStatusIgnoresSessionsBeforeDesktopHello(t *testing.T) {
+	hub, closeStore := newTestHub(t)
+	defer closeStore()
+	session := &Session{
+		id:        "desktop-pre-hello",
+		role:      "desktop",
+		board:     kanban.DefaultBoardID,
+		projectID: kanban.DefaultProjectID,
+		hub:       hub,
+		send:      make(chan OutEnvelope, 8),
+		closed:    make(chan struct{}),
+	}
+	hub.register(session)
+
+	status := hub.DesktopStatus()
+
+	if status.Online {
+		t.Fatalf("expected pre-hello desktop session to stay offline, got %#v", status)
+	}
+	if len(status.Sessions) != 0 {
+		t.Fatalf("expected no visible desktop sessions before hello, got %#v", status.Sessions)
 	}
 }
 
@@ -175,6 +207,10 @@ func TestHubDesktopHelloReplacesDuplicateDeviceSessions(t *testing.T) {
 	hub.register(second)
 	payload, err := json.Marshal(map[string]any{
 		"deviceId":          "device-1",
+		"deviceName":        "佳林的 MacBook",
+		"deviceAlias":       "佳林的 MacBook",
+		"hostname":          "Jialin-MacBook",
+		"username":          "jialin",
 		"selectedProjectId": kanban.DefaultProjectID,
 		"capabilities":      []string{"desktop.assistant.listAgents"},
 		"currentUser": map[string]string{
@@ -223,6 +259,9 @@ func TestHubDesktopHelloReplacesDuplicateDeviceSessions(t *testing.T) {
 	}
 	if len(status.Sessions[0].Agents) != 1 || status.Sessions[0].Agents[0].AgentKey != "cutej" {
 		t.Fatalf("expected desktop hello agents to be cached, got %#v", status.Sessions[0].Agents)
+	}
+	if status.Sessions[0].DeviceName != "佳林的 MacBook" || status.Sessions[0].DeviceAlias != "佳林的 MacBook" {
+		t.Fatalf("expected desktop hello device metadata, got %#v", status.Sessions[0])
 	}
 }
 
@@ -285,6 +324,7 @@ func TestHubAssignAndRunForwardsCloudIssueToDesktopAndUpdatesRun(t *testing.T) {
 	assignPayload, err := json.Marshal(kanban.AssignAndRunInput{
 		ID:                     created.Issue.ID,
 		AgentKey:               &agentKey,
+		AccessLevel:            "full_access",
 		BaseIssueRevision:      &created.Issue.Revision,
 		IdempotencyKey:         "assign-run-test",
 		TargetDesktopSessionID: desktop.id,
@@ -329,6 +369,9 @@ gotDesktopRequest:
 	forwardedAgentKey, ok := requestPayload["agentKey"].(*string)
 	if !ok || forwardedAgentKey == nil || *forwardedAgentKey != agentKey {
 		t.Fatalf("expected agent key %q, got %#v", agentKey, requestPayload["agentKey"])
+	}
+	if requestPayload["accessLevel"] != "full_access" {
+		t.Fatalf("expected accessLevel full_access, got %#v", requestPayload["accessLevel"])
 	}
 	remoteIssue, ok := requestPayload["issue"].(*kanban.Issue)
 	if !ok || remoteIssue.ID != created.Issue.ID || remoteIssue.Title != "Cloud run task" {

@@ -340,9 +340,10 @@ func TestServiceMovesAssistantCompletionToCompletedWhenReviewNotRequired(t *test
 	}
 
 	result, err := service.SyncAssistantEvent(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.AssistantEvent{
-		Type:   "run.complete",
-		ChatID: &chatID,
-		RunID:  &runID,
+		Type:    "run.complete",
+		ChatID:  &chatID,
+		RunID:   &runID,
+		Message: strPtr("现在是 10:30。"),
 	}, "desktop")
 	if err != nil {
 		t.Fatal(err)
@@ -352,6 +353,47 @@ func TestServiceMovesAssistantCompletionToCompletedWhenReviewNotRequired(t *test
 	}
 	if result.Issue.RunID != nil {
 		t.Fatalf("expected run id to be cleared")
+	}
+	runs, err := service.ListAgentRuns(context.Background(), issue.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].ResultMessage == nil || *runs[0].ResultMessage != "现在是 10:30。" {
+		t.Fatalf("expected completed run result message, got %#v", runs)
+	}
+}
+
+func TestServiceMapsAssistantCompletionAliases(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	issue := createIssue(t, service, "Assistant alias task")
+	chatID := "chat-alias"
+	runID := "run-alias"
+	_, err := service.StartRun(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, strPtr("agent"), kanban.StartRunResult{
+		OK:      true,
+		Message: "started",
+		ChatID:  &chatID,
+		RunID:   &runID,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	status := "succeeded"
+	result, err := service.SyncAssistantEvent(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.AssistantEvent{
+		Type:   "run.completed",
+		Status: &status,
+		ChatID: &chatID,
+		RunID:  &runID,
+	}, "desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Issue == nil || result.Issue.Status != kanban.StatusCompleted {
+		t.Fatalf("expected completion alias to move issue to completed: %#v", result)
+	}
+	if result.Issue.RunState == nil || *result.Issue.RunState != kanban.RunStateCompleted {
+		t.Fatalf("expected completed run state, got %#v", result.Issue)
 	}
 }
 

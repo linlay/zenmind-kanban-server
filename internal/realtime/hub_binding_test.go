@@ -136,6 +136,103 @@ func TestHubSnapshotAppliesFutureBindingScope(t *testing.T) {
 	}
 }
 
+func TestHubSnapshotKeepsRunOnlyForTargetDesktopSession(t *testing.T) {
+	hub, closeStore := newTestHub(t)
+	defer closeStore()
+	issue := createHubIssue(t, hub, "targeted run")
+	desktopA := registerTestDesktop(t, hub, "desktop-run-a", "device-run-a")
+	desktopB := registerTestDesktop(t, hub, "desktop-run-b", "device-run-b")
+	agentKey := "cutej"
+	chatID := "chat-target"
+	runID := "run-target"
+	if _, err := hub.service.StartRun(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, &agentKey, kanban.StartRunResult{
+		OK:        true,
+		Message:   "started",
+		ChatID:    &chatID,
+		RunID:     &runID,
+		SessionID: desktopA.id,
+	}, "web"); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshotA, err := hub.snapshotForSession(desktopA, kanban.DefaultBoardID, kanban.DefaultProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshotA.Issues) != 1 || snapshotA.Issues[0].ID != issue.ID {
+		t.Fatalf("expected target desktop to receive run issue, got %#v", snapshotA.Issues)
+	}
+	snapshotB, err := hub.snapshotForSession(desktopB, kanban.DefaultBoardID, kanban.DefaultProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshotB.Issues) != 0 {
+		t.Fatalf("expected non-target desktop to be filtered, got %#v", snapshotB.Issues)
+	}
+}
+
+func TestHubCreateIssuePinsTargetDesktopDevice(t *testing.T) {
+	hub, closeStore := newTestHub(t)
+	defer closeStore()
+	desktopA := registerTestDesktop(t, hub, "desktop-create-a", "device-create-a")
+	desktopB := registerTestDesktop(t, hub, "desktop-create-b", "device-create-b")
+	web := &Session{
+		id:        "web-create",
+		role:      "web",
+		board:     kanban.DefaultBoardID,
+		projectID: kanban.DefaultProjectID,
+		hub:       hub,
+		send:      make(chan OutEnvelope, 16),
+		closed:    make(chan struct{}),
+	}
+	hub.register(web)
+	payload, err := json.Marshal(map[string]any{
+		"input": map[string]any{
+			"title":       "targeted create",
+			"workerType":  "agent",
+			"workerAgent": "cutej",
+		},
+		"targetDesktopSessionId": desktopA.id,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.handle(web, Envelope{
+		V:         ProtocolVersion,
+		Type:      "rpc.req",
+		ID:        "create-targeted",
+		Op:        "kanban.issue.create",
+		Role:      "web",
+		BoardID:   kanban.DefaultBoardID,
+		ProjectID: kanban.DefaultProjectID,
+		Payload:   payload,
+	})
+	var response OutEnvelope
+	select {
+	case response = <-web.send:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for create response")
+	}
+	result, ok := response.Payload.(kanban.ChangeResult)
+	if !ok || !result.OK || result.Issue == nil {
+		t.Fatalf("expected create change result, got %#v", response.Payload)
+	}
+	snapshotA, err := hub.snapshotForSession(desktopA, kanban.DefaultBoardID, kanban.DefaultProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshotA.Issues) != 1 || snapshotA.Issues[0].ID != result.Issue.ID {
+		t.Fatalf("expected target desktop to receive created issue, got %#v", snapshotA.Issues)
+	}
+	snapshotB, err := hub.snapshotForSession(desktopB, kanban.DefaultBoardID, kanban.DefaultProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshotB.Issues) != 0 {
+		t.Fatalf("expected non-target desktop to be filtered, got %#v", snapshotB.Issues)
+	}
+}
+
 func TestHubSnapshotDisabledBindingSendsIncomplete(t *testing.T) {
 	hub, closeStore := newTestHub(t)
 	defer closeStore()
@@ -227,8 +324,12 @@ func TestHubDispatchAllowsUnboundProject(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected map payload, got %T", desktopRequest.Payload)
 	}
-	if _, hasBinding := payloadMap["binding"]; hasBinding {
-		t.Fatalf("expected unbound dispatch payload without binding context")
+	bindingContext, hasBinding := payloadMap["binding"].(map[string]any)
+	if !hasBinding {
+		t.Fatalf("expected dispatch payload to include implicit binding context")
+	}
+	if bindingContext["localProjectId"] != kanban.DefaultProjectID {
+		t.Fatalf("expected implicit binding localProjectId, got %#v", bindingContext)
 	}
 	responsePayload, err := json.Marshal(map[string]any{"ok": true})
 	if err != nil {

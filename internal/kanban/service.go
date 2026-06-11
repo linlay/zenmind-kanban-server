@@ -36,6 +36,8 @@ type Repository interface {
 	ListAgentRunsForIssues(ctx context.Context, issueIDs []string) ([]AgentRun, error)
 	ListAgentToolCalls(ctx context.Context, agentRunID string) ([]AgentToolCall, error)
 	ListAgentToolCallsForRuns(ctx context.Context, agentRunIDs []string) ([]AgentToolCall, error)
+	SetAgentRunSession(ctx context.Context, agentRunID string, sessionID string) error
+	UpdateAgentRunCompletion(ctx context.Context, agentRunID string, status string, resultMessage *string, errorMessage *string) error
 	ListRecentEvents(ctx context.Context, boardID string, limit int) ([]EventLogItem, error)
 	GetIssue(ctx context.Context, boardID string, issueID string) (*Issue, error)
 	ReplaceIssue(ctx context.Context, boardID string, issue Issue, eventType string, actor string) (int64, error)
@@ -486,7 +488,17 @@ func (s *Service) StartRun(ctx context.Context, boardID string, projectID string
 		RunID:            result.RunID,
 		RunState:         &running,
 	}
-	return s.updateIssue(ctx, boardID, projectID, issueID, input, actor, true, "issue 已分配给智能体。", "kanban.issue.updated")
+	change, err := s.updateIssue(ctx, boardID, projectID, issueID, input, actor, true, "issue 已分配给智能体。", "kanban.issue.updated")
+	if err != nil {
+		return change, err
+	}
+	sessionID := strings.TrimSpace(result.SessionID)
+	if sessionID != "" && change.Issue != nil && change.Issue.ActiveRunID != nil {
+		if err := s.repo.SetAgentRunSession(ctx, *change.Issue.ActiveRunID, sessionID); err != nil {
+			return ChangeResult{}, err
+		}
+	}
+	return change, nil
 }
 
 func (s *Service) MoveIssue(ctx context.Context, boardID string, projectID string, input MoveInput, actor string) (ChangeResult, error) {
@@ -729,6 +741,12 @@ func (s *Service) SyncAssistantEvent(ctx context.Context, boardID string, projec
 	nextRevision, err := s.repo.ReplaceIssue(ctx, boardID, next, "kanban.issue.updated", actor)
 	if err != nil {
 		return ChangeResult{}, err
+	}
+	if next.ActiveRunID != nil {
+		resultMessage, errorMessage := assistantEventRunMessages(runState, eventMessage)
+		if err := s.repo.UpdateAgentRunCompletion(ctx, *next.ActiveRunID, normalizeAgentRunStatusForRunState(*runState), resultMessage, errorMessage); err != nil {
+			return ChangeResult{}, err
+		}
 	}
 	issues, _, err := s.repo.ListIssues(ctx, boardID, projectID)
 	if err != nil {
@@ -1637,36 +1655,64 @@ func createProjectBindingID() string {
 }
 
 func runStateFromAssistantEvent(event AssistantEvent) *RunState {
-	if event.Type == "done" || event.Type == "run.complete" {
-		state := RunStateCompleted
-		return &state
-	}
+	eventType := strings.ToLower(strings.TrimSpace(event.Type))
 	status := ""
 	if event.Status != nil {
 		status = strings.ToLower(strings.TrimSpace(*event.Status))
 	}
-	if event.Type == "run.cancel" ||
-		event.Type == "run.cancelled" ||
-		event.Type == "run.canceled" ||
-		event.Type == "task.cancel" ||
-		event.Type == "task.cancelled" ||
-		event.Type == "task.canceled" ||
-		event.Type == "stopped" ||
-		event.Type == "run.stopped" ||
-		event.Type == "run.interrupt" ||
+	if eventType == "done" ||
+		eventType == "complete" ||
+		eventType == "completed" ||
+		eventType == "success" ||
+		eventType == "succeeded" ||
+		eventType == "finish" ||
+		eventType == "finished" ||
+		eventType == "run.complete" ||
+		eventType == "run.completed" ||
+		eventType == "run.success" ||
+		eventType == "run.succeeded" ||
+		eventType == "task.complete" ||
+		eventType == "task.completed" ||
+		eventType == "task.success" ||
+		eventType == "task.succeeded" ||
+		status == "done" ||
+		status == "complete" ||
+		status == "completed" ||
+		status == "success" ||
+		status == "succeeded" ||
+		status == "finish" ||
+		status == "finished" {
+		state := RunStateCompleted
+		return &state
+	}
+	if eventType == "cancel" ||
+		eventType == "cancelled" ||
+		eventType == "canceled" ||
+		eventType == "run.cancel" ||
+		eventType == "run.cancelled" ||
+		eventType == "run.canceled" ||
+		eventType == "task.cancel" ||
+		eventType == "task.cancelled" ||
+		eventType == "task.canceled" ||
+		eventType == "stopped" ||
+		eventType == "run.stopped" ||
+		eventType == "run.interrupt" ||
 		status == "cancelled" ||
 		status == "canceled" ||
 		status == "stopped" {
 		state := RunStateCancelled
 		return &state
 	}
-	if event.Type == "error" ||
-		event.Type == "run.error" ||
-		event.Type == "run.fail" ||
-		event.Type == "run.failed" ||
-		event.Type == "task.fail" ||
-		event.Type == "task.failed" ||
-		event.Type == "run.expired" ||
+	if eventType == "error" ||
+		eventType == "failed" ||
+		eventType == "fail" ||
+		eventType == "timeout" ||
+		eventType == "run.error" ||
+		eventType == "run.fail" ||
+		eventType == "run.failed" ||
+		eventType == "task.fail" ||
+		eventType == "task.failed" ||
+		eventType == "run.expired" ||
 		status == "error" ||
 		status == "failed" ||
 		status == "fail" ||
@@ -1688,6 +1734,34 @@ func assistantEventChangeMessage(runState *RunState, detail string) string {
 		return "task 运行已取消：" + strings.TrimSpace(detail)
 	default:
 		return "task 运行状态已更新。"
+	}
+}
+
+func normalizeAgentRunStatusForRunState(runState RunState) string {
+	switch runState {
+	case RunStateCompleted:
+		return "completed"
+	case RunStateFailed:
+		return "failed"
+	case RunStateCancelled:
+		return "cancelled"
+	default:
+		return "running"
+	}
+}
+
+func assistantEventRunMessages(runState *RunState, detail string) (*string, *string) {
+	detail = strings.TrimSpace(detail)
+	if runState == nil || detail == "" {
+		return nil, nil
+	}
+	switch *runState {
+	case RunStateCompleted:
+		return &detail, nil
+	case RunStateFailed, RunStateCancelled:
+		return nil, &detail
+	default:
+		return nil, nil
 	}
 }
 

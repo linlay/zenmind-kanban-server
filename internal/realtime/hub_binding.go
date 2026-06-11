@@ -102,6 +102,50 @@ func (h *Hub) resolveDispatchBinding(projectID string, targetDesktopSessionID st
 	return binding, ""
 }
 
+func (h *Hub) ensureDispatchBinding(projectID string, targetDesktopSessionID string) (*kanban.ProjectBinding, string) {
+	binding, denyReason := h.resolveDispatchBinding(projectID, targetDesktopSessionID)
+	if denyReason != "" || binding != nil {
+		return binding, denyReason
+	}
+	deviceID := ""
+	currentUserID := ""
+	h.mu.RLock()
+	if targetDesktopSessionID != "" {
+		if session := h.desktopSessions[strings.TrimSpace(targetDesktopSessionID)]; session != nil {
+			deviceID = session.deviceID
+			currentUserID = session.currentUser.ID
+		}
+	} else if len(h.desktopSessions) == 1 {
+		for _, session := range h.desktopSessions {
+			deviceID = session.deviceID
+			currentUserID = session.currentUser.ID
+		}
+	}
+	h.mu.RUnlock()
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return nil, ""
+	}
+	result, err := h.service.CreateProjectBinding(context.Background(), kanban.ProjectBindingInput{
+		ProjectID:        projectID,
+		DeviceID:         deviceID,
+		CurrentUserID:    strings.TrimSpace(currentUserID),
+		LocalProjectID:   projectID,
+		LocalDisplayName: "云端派发",
+		SyncPolicy:       "select",
+		ControlMode:      "dispatch",
+		Status:           "active",
+	}, "dispatch")
+	if err != nil {
+		h.logger.Warn("failed to create implicit dispatch binding", "error", err, "project", projectID, "device", deviceID)
+		return nil, ""
+	}
+	if !result.OK || result.Binding == nil {
+		return nil, result.Message
+	}
+	return result.Binding, ""
+}
+
 // dispatchBindingContext 注入到 desktop 转发 payload 的绑定上下文。
 func dispatchBindingContext(binding *kanban.ProjectBinding) map[string]any {
 	if binding == nil {

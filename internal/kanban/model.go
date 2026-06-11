@@ -218,6 +218,7 @@ type ClaimInput struct {
 type AssignAndRunInput struct {
 	ID                     string  `json:"id"`
 	AgentKey               *string `json:"agentKey"`
+	AccessLevel            string  `json:"accessLevel,omitempty"`
 	BaseIssueRevision      *int64  `json:"baseIssueRevision"`
 	IdempotencyKey         string  `json:"idempotencyKey"`
 	TargetDesktopSessionID string  `json:"targetDesktopSessionId"`
@@ -233,11 +234,12 @@ type AssistantEvent struct {
 }
 
 type StartRunResult struct {
-	OK       bool    `json:"ok"`
-	Message  string  `json:"message"`
-	ChatID   *string `json:"chatId"`
-	RunID    *string `json:"runId"`
-	AgentKey *string `json:"agentKey"`
+	OK        bool    `json:"ok"`
+	Message   string  `json:"message"`
+	ChatID    *string `json:"chatId"`
+	RunID     *string `json:"runId"`
+	AgentKey  *string `json:"agentKey"`
+	SessionID string  `json:"sessionId,omitempty"`
 }
 
 type DesktopStatus struct {
@@ -251,6 +253,10 @@ type DesktopStatus struct {
 type DesktopSessionStatus struct {
 	SessionID         string               `json:"sessionId"`
 	DeviceID          string               `json:"deviceId,omitempty"`
+	DeviceName        string               `json:"deviceName,omitempty"`
+	DeviceAlias       string               `json:"deviceAlias,omitempty"`
+	Hostname          string               `json:"hostname,omitempty"`
+	Username          string               `json:"username,omitempty"`
 	CurrentUserID     string               `json:"currentUserId,omitempty"`
 	CurrentUserName   string               `json:"currentUserName,omitempty"`
 	SelectedProjectID string               `json:"selectedProjectId,omitempty"`
@@ -268,6 +274,10 @@ type DesktopAgentOption struct {
 
 type DesktopOnlineDevice struct {
 	DeviceID          string                 `json:"deviceId"`
+	DeviceName        string                 `json:"deviceName,omitempty"`
+	DeviceAlias       string                 `json:"deviceAlias,omitempty"`
+	Hostname          string                 `json:"hostname,omitempty"`
+	Username          string                 `json:"username,omitempty"`
 	CurrentUserID     string                 `json:"currentUserId,omitempty"`
 	CurrentUserName   string                 `json:"currentUserName,omitempty"`
 	SelectedProjectID string                 `json:"selectedProjectId,omitempty"`

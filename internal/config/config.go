@@ -10,6 +10,7 @@ type Config struct {
 	DatabasePath   string
 	AllowedOrigins []string
 	Token          string
+	StaticDir      string
 }
 
 func Load() Config {
@@ -18,6 +19,7 @@ func Load() Config {
 		DatabasePath:   env("ZENMIND_KANBAN_DB", "./data/kanban.db"),
 		AllowedOrigins: csvEnv("ZENMIND_KANBAN_ALLOWED_ORIGINS", "*"),
 		Token:          strings.TrimSpace(os.Getenv("ZENMIND_KANBAN_TOKEN")),
+		StaticDir:      env("ZENMIND_KANBAN_STATIC_DIR", ""),
 	}
 }
 

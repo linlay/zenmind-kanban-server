@@ -438,7 +438,7 @@ func (s *Store) ListAgentRuns(ctx context.Context, issueID string) ([]kanban.Age
 	query := `
 		SELECT ID_, ISSUE_ID_, AGENT_ID_, WORKER_AGENT_, DELEGATED_BY_, CHAT_ID_, RUN_ID_, SESSION_ID_,
 			STATUS_, CONFIDENCE_, INPUT_TOKENS_, OUTPUT_TOKENS_, COST_MICROS_,
-			STARTED_AT_, FINISHED_AT_, ERROR_MESSAGE_, CREATED_AT_, UPDATED_AT_
+			STARTED_AT_, FINISHED_AT_, RESULT_MESSAGE_, ERROR_MESSAGE_, CREATED_AT_, UPDATED_AT_
 		FROM agent_run
 	`
 	args := []any{}
@@ -472,7 +472,7 @@ func (s *Store) ListAgentRunsForIssues(ctx context.Context, issueIDs []string) (
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT ID_, ISSUE_ID_, AGENT_ID_, WORKER_AGENT_, DELEGATED_BY_, CHAT_ID_, RUN_ID_, SESSION_ID_,
 			STATUS_, CONFIDENCE_, INPUT_TOKENS_, OUTPUT_TOKENS_, COST_MICROS_,
-			STARTED_AT_, FINISHED_AT_, ERROR_MESSAGE_, CREATED_AT_, UPDATED_AT_
+			STARTED_AT_, FINISHED_AT_, RESULT_MESSAGE_, ERROR_MESSAGE_, CREATED_AT_, UPDATED_AT_
 		FROM agent_run
 		WHERE `+where+`
 		ORDER BY CREATED_AT_ DESC, ID_ ASC
@@ -490,6 +490,34 @@ func (s *Store) ListAgentRunsForIssues(ctx context.Context, issueIDs []string) (
 		values = append(values, item)
 	}
 	return values, rows.Err()
+}
+
+func (s *Store) SetAgentRunSession(ctx context.Context, agentRunID string, sessionID string) error {
+	agentRunID = strings.TrimSpace(agentRunID)
+	sessionID = strings.TrimSpace(sessionID)
+	if agentRunID == "" || sessionID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE agent_run
+		SET SESSION_ID_ = ?, UPDATED_AT_ = ?
+		WHERE ID_ = ?
+	`, sessionID, time.Now().UTC().Format(time.RFC3339Nano), agentRunID)
+	return err
+}
+
+func (s *Store) UpdateAgentRunCompletion(ctx context.Context, agentRunID string, status string, resultMessage *string, errorMessage *string) error {
+	agentRunID = strings.TrimSpace(agentRunID)
+	if agentRunID == "" {
+		return nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE agent_run
+		SET STATUS_ = ?, RESULT_MESSAGE_ = ?, ERROR_MESSAGE_ = ?, FINISHED_AT_ = COALESCE(FINISHED_AT_, ?), UPDATED_AT_ = ?
+		WHERE ID_ = ?
+	`, status, trimmedPtr(resultMessage), trimmedPtr(errorMessage), now, now, agentRunID)
+	return err
 }
 
 func (s *Store) ListAgentToolCalls(ctx context.Context, agentRunID string) ([]kanban.AgentToolCall, error) {
@@ -1112,13 +1140,13 @@ func scanReviewComment(scanner issueScanner) (kanban.ReviewComment, error) {
 
 func scanAgentRun(scanner issueScanner) (kanban.AgentRun, error) {
 	var item kanban.AgentRun
-	var agentID, workerAgent, delegatedBy, chatID, runID, sessionID, errorMessage sql.NullString
+	var agentID, workerAgent, delegatedBy, chatID, runID, sessionID, resultMessage, errorMessage sql.NullString
 	var confidence sql.NullFloat64
 	var inputTokens, outputTokens, costMicros sql.NullInt64
 	var startedAt, finishedAt sql.NullString
 	var createdAt, updatedAt string
 	err := scanner.Scan(&item.ID, &item.IssueID, &agentID, &workerAgent, &delegatedBy, &chatID, &runID, &sessionID,
-		&item.Status, &confidence, &inputTokens, &outputTokens, &costMicros, &startedAt, &finishedAt, &errorMessage, &createdAt, &updatedAt)
+		&item.Status, &confidence, &inputTokens, &outputTokens, &costMicros, &startedAt, &finishedAt, &resultMessage, &errorMessage, &createdAt, &updatedAt)
 	if err != nil {
 		return item, err
 	}
@@ -1128,6 +1156,7 @@ func scanAgentRun(scanner issueScanner) (kanban.AgentRun, error) {
 	item.ChatID = stringPtr(chatID)
 	item.RunID = stringPtr(runID)
 	item.SessionID = stringPtr(sessionID)
+	item.ResultMessage = stringPtr(resultMessage)
 	item.ErrorMessage = stringPtr(errorMessage)
 	item.Confidence = floatPtr(confidence)
 	item.InputTokens = intPtr(inputTokens)

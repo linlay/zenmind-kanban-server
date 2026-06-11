@@ -16,6 +16,10 @@ type Session struct {
 	board        string
 	projectID    string
 	deviceID     string
+	deviceName   string
+	deviceAlias  string
+	hostname     string
+	username     string
 	currentUser  DesktopCurrentUser
 	scope        string
 	capabilities []string
