@@ -363,6 +363,47 @@ func TestServiceMovesAssistantCompletionToCompletedWhenReviewNotRequired(t *test
 	}
 }
 
+func TestServicePreservesAssistantResultWhenDuplicateCompletionIsEmpty(t *testing.T) {
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	issue := createIssue(t, service, "Assistant duplicate completion task")
+	chatID := "chat-duplicate-complete"
+	runID := "run-duplicate-complete"
+	_, err := service.StartRun(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, issue.ID, strPtr("agent"), kanban.StartRunResult{
+		OK:      true,
+		Message: "started",
+		ChatID:  &chatID,
+		RunID:   &runID,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.SyncAssistantEvent(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.AssistantEvent{
+		Type:    "run.complete",
+		ChatID:  &chatID,
+		RunID:   &runID,
+		Message: strPtr("最终结果已生成。"),
+	}, "desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.SyncAssistantEvent(context.Background(), kanban.DefaultBoardID, kanban.DefaultProjectID, kanban.AssistantEvent{
+		Type:   "run.complete",
+		ChatID: &chatID,
+		RunID:  &runID,
+	}, "desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, err := service.ListAgentRuns(context.Background(), issue.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].ResultMessage == nil || *runs[0].ResultMessage != "最终结果已生成。" {
+		t.Fatalf("expected duplicate empty completion to preserve result message, got %#v", runs)
+	}
+}
+
 func TestServiceMapsAssistantCompletionAliases(t *testing.T) {
 	service, closeStore := newTestService(t)
 	defer closeStore()

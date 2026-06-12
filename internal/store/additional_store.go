@@ -514,9 +514,13 @@ func (s *Store) UpdateAgentRunCompletion(ctx context.Context, agentRunID string,
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_run
-		SET STATUS_ = ?, RESULT_MESSAGE_ = ?, ERROR_MESSAGE_ = ?, FINISHED_AT_ = COALESCE(FINISHED_AT_, ?), UPDATED_AT_ = ?
+		SET STATUS_ = ?,
+			RESULT_MESSAGE_ = CASE WHEN ? IS NULL THEN RESULT_MESSAGE_ ELSE ? END,
+			ERROR_MESSAGE_ = CASE WHEN ? IS NULL THEN ERROR_MESSAGE_ ELSE ? END,
+			FINISHED_AT_ = COALESCE(FINISHED_AT_, ?),
+			UPDATED_AT_ = ?
 		WHERE ID_ = ?
-	`, status, trimmedPtr(resultMessage), trimmedPtr(errorMessage), now, now, agentRunID)
+	`, status, trimmedPtr(resultMessage), trimmedPtr(resultMessage), trimmedPtr(errorMessage), trimmedPtr(errorMessage), now, now, agentRunID)
 	return err
 }
 
